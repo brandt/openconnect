@@ -56,11 +56,18 @@
 #include <termios.h>
 #endif
 
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#include <CoreServices/CoreServices.h>
+
 #ifdef HAVE_NL_LANGINFO
 #include <langinfo.h>
 
 static const char *legacy_charset;
 #endif
+
+#define SERVICE_NAME "openconnect"
+
 
 static int write_new_config(void *_vpninfo,
 			    const char *buf, int buflen);
@@ -186,6 +193,51 @@ enum {
 	OPT_PROXY_AUTH,
 	OPT_HTTP_AUTH,
 };
+
+// Call SecKeychainAddGenericPassword to add a new password to the keychain:
+OSStatus StorePasswordKeychain(char *username, void *password, UInt32 passwordLength) {
+    OSStatus status;
+    status = SecKeychainAddGenericPassword(
+                                            NULL,                           // default keychain
+                                            strlen(SERVICE_NAME),           // length of service name
+                                            SERVICE_NAME,                   // service name
+                                            (unsigned int)strlen(username), // length of account name
+                                            username,                       // account name
+                                            passwordLength,                 // length of password
+                                            password,                       // pointer to password data
+                                            NULL                            // the item reference
+                                            );
+    return (status);
+}
+
+// Call SecKeychainFindGenericPassword to get a password from the keychain:
+OSStatus GetPasswordKeychain(char *username, void *passwordData, UInt32 *passwordLength, SecKeychainItemRef *itemRef) {
+    OSStatus status1;
+    status1 = SecKeychainFindGenericPassword(
+                                              NULL,                           // default keychain
+                                              strlen(SERVICE_NAME),           // length of service name
+                                              SERVICE_NAME,                   // service name
+                                              (unsigned int)strlen(username), // length of account name
+                                              username,                       // account name
+                                              passwordLength,                 // length of password
+                                              passwordData,                   // pointer to password data
+                                              itemRef                         // the item reference
+                                              );
+    return (status1);
+}
+
+// Call SecKeychainItemModifyAttributesAndData to change the password for
+// an item already in the keychain:
+OSStatus ChangePasswordKeychain(SecKeychainItemRef itemRef, const char *password) {
+    OSStatus status;
+    status = SecKeychainItemModifyAttributesAndData(
+                                                     itemRef,                         // the item reference
+                                                     NULL,                            // no change to attributes
+                                                     (unsigned int)strlen(password),  // length of password
+                                                     password                         // pointer to password data
+                                                     );
+    return (status);
+}
 
 #ifdef __sun__
 /*
@@ -1893,9 +1945,10 @@ static int process_auth_form_cb(void *_vpninfo,
 			if (username &&
 			    !strcmp(opt->name, "username")) {
 				opt->_value = username;
-				username = NULL;
+                // username = NULL;
 			} else {
 				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
+                username = opt->_value;
 			}
 
 			if (!opt->_value)
@@ -1903,12 +1956,44 @@ static int process_auth_form_cb(void *_vpninfo,
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_PASSWORD) {
-			if (password &&
-			    !strcmp(opt->name, "password")) {
+            printf("Entering password section...\n");
+
+			if (password && !strcmp(opt->name, "password")) {
 				opt->_value = password;
 				password = NULL;
-			} else {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+            } else if (strcmp(opt->name, "password#2") == 0) {
+				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
+				password = NULL;
+            } else {
+                OSStatus status = 0;
+                OSStatus status1 = 0;
+                void *passwordData = nil;  // will be allocated and filled in by SecKeychainFindGenericPassword
+                SecKeychainItemRef itemRef = nil;
+                UInt32 passwordLength = 0;
+
+                printf("Checking keychain for %s\n", username);
+                status1 = GetPasswordKeychain(username, &passwordData, &passwordLength, &itemRef);
+//              printf("Got password: %s\n", passwordData);
+
+                // If call was successful, authenticate user and continue.
+                if (status1 == noErr) {
+                    opt->_value = passwordData;
+                    // Free the data allocated by SecKeychainFindGenericPassword:
+                    // status = SecKeychainItemFreeContent(NULL, passwordData);
+                }
+
+                // Is password on keychain?
+                if (status1 == errSecItemNotFound) {
+                    /* If password is not on keychain, display dialog to prompt user for name and password.
+                     * Authenticate user.  If unsuccessful, prompt user again for name and password.
+                     * If successful, ask user whether to store new password on keychain; if no, return.
+                     * If yes, store password: */
+                    printf("No password in keychain for %s. We'll add it now.\n", username);
+    				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+                    status = StorePasswordKeychain(username, opt->_value, strlen(opt->_value));
+                }
+
+                if (itemRef) { CFRelease(itemRef); }
 			}
 
 			if (!opt->_value)
