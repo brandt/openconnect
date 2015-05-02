@@ -62,6 +62,12 @@ case $host_os in
     ;;
  *darwin*)
     LIBPCSCLITE_LIBS="-Wl,-framework -Wl,PCSC"
+	AC_CHECK_HEADERS(Security/Security.h, [
+			CPPFLAGS="$CPPFLAGS -D__APPLE_KEYCHAIN__"
+			KEYCHAIN_LDFLAGS="-framework Security -framework CoreFoundation"
+			AC_SUBST(KEYCHAIN_LDFLAGS)
+			],
+			AC_MSG_WARN([Security framework not found. Disabling Mac OS X Keychain support.]))
     LIBPCSCLITE_CFLAGS=" "
     ;;
  *)
