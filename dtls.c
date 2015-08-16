@@ -434,9 +434,25 @@ void dtls_shutdown(struct openconnect_info *vpninfo)
 	SSL_CTX_free(vpninfo->dtls_ctx);
 }
 
+void append_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *buf)
+{
+#ifdef HAVE_DTLS12
+	buf_append(buf, "OC-DTLS1_2-AES256-GCM:OC-DTLS1_2-AES128-GCM:AES256-SHA:AES128-SHA:DES-CBC3-SHA:DES-CBC-SHA");
+#else
+	buf_append(buf, "AES256-SHA:AES128-SHA:DES-CBC3-SHA:DES-CBC-SHA");
+#endif
+}
+
 #elif defined(DTLS_GNUTLS)
 #include <gnutls/dtls.h>
 #include "gnutls.h"
+
+#if GNUTLS_VERSION_NUMBER < 0x030200
+# define GNUTLS_DTLS1_2 202
+#endif
+#if GNUTLS_VERSION_NUMBER < 0x030400
+# define GNUTLS_CIPHER_CHACHA20_POLY1305 23
+#endif
 
 struct {
 	const char *name;
@@ -444,20 +460,77 @@ struct {
 	gnutls_cipher_algorithm_t cipher;
 	gnutls_mac_algorithm_t mac;
 	const char *prio;
+	const char *min_gnutls_version;
 } gnutls_dtls_ciphers[] = {
 	{ "AES128-SHA", GNUTLS_DTLS0_9, GNUTLS_CIPHER_AES_128_CBC, GNUTLS_MAC_SHA1,
-	  "NONE:+VERS-DTLS0.9:+COMP-NULL:+AES-128-CBC:+SHA1:+RSA:%COMPAT" },
+	  "NONE:+VERS-DTLS0.9:+COMP-NULL:+AES-128-CBC:+SHA1:+RSA:%COMPAT", "3.0.0" },
 	{ "AES256-SHA", GNUTLS_DTLS0_9, GNUTLS_CIPHER_AES_256_CBC, GNUTLS_MAC_SHA1,
-	  "NONE:+VERS-DTLS0.9:+COMP-NULL:+AES-256-CBC:+SHA1:+RSA:%COMPAT" },
+	  "NONE:+VERS-DTLS0.9:+COMP-NULL:+AES-256-CBC:+SHA1:+RSA:%COMPAT", "3.0.0" },
 	{ "DES-CBC3-SHA", GNUTLS_DTLS0_9, GNUTLS_CIPHER_3DES_CBC, GNUTLS_MAC_SHA1,
-	  "NONE:+VERS-DTLS0.9:+COMP-NULL:+3DES-CBC:+SHA1:+RSA:%COMPAT" },
-#if GNUTLS_VERSION_NUMBER >= 0x030207 /* if DTLS 1.2 is supported (and a bug in gnutls is solved) */
+	  "NONE:+VERS-DTLS0.9:+COMP-NULL:+3DES-CBC:+SHA1:+RSA:%COMPAT", "3.0.0" },
 	{ "OC-DTLS1_2-AES128-GCM", GNUTLS_DTLS1_2, GNUTLS_CIPHER_AES_128_GCM, GNUTLS_MAC_AEAD,
-	  "NONE:+VERS-DTLS1.2:+COMP-NULL:+AES-128-GCM:+AEAD:+RSA:%COMPAT:+SIGN-ALL" },
+	  "NONE:+VERS-DTLS1.2:+COMP-NULL:+AES-128-GCM:+AEAD:+RSA:%COMPAT:+SIGN-ALL", "3.2.7" },
 	{ "OC-DTLS1_2-AES256-GCM", GNUTLS_DTLS1_2, GNUTLS_CIPHER_AES_256_GCM, GNUTLS_MAC_AEAD,
-	  "NONE:+VERS-DTLS1.2:+COMP-NULL:+AES-256-GCM:+AEAD:+RSA:%COMPAT:+SIGN-ALL" },
-#endif
+	  "NONE:+VERS-DTLS1.2:+COMP-NULL:+AES-256-GCM:+AEAD:+RSA:%COMPAT:+SIGN-ALL", "3.2.7" },
+	{ "OC-DTLS1_2-CHACHA20-POLY1305", GNUTLS_DTLS1_2, GNUTLS_CIPHER_CHACHA20_POLY1305, GNUTLS_MAC_AEAD,
+	  "NONE:+VERS-DTLS1.2:+COMP-NULL:+CHACHA20-POLY1305:+AEAD:+RSA:%COMPAT:+SIGN-ALL", "3.4.0" },
 };
+
+#if GNUTLS_VERSION_NUMBER < 0x030009
+void append_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *buf)
+{
+	int i, first = 1;
+
+	for (i = 0; i < sizeof(gnutls_dtls_ciphers) / sizeof(gnutls_dtls_ciphers[0]); i++) {
+		if (gnutls_check_version(gnutls_dtls_ciphers[i].min_gnutls_version)) {
+			buf_append(buf, "%s%s", first ? "" : ":",
+				   gnutls_dtls_ciphers[i].name);
+			first = 0;
+		}
+	}
+#else
+void append_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *buf)
+{
+	/* only enable the ciphers that would have been negotiated in the TLS channel */
+	unsigned i, j, first = 1;
+	int ret;
+	unsigned idx;
+	gnutls_cipher_algorithm_t cipher;
+	gnutls_mac_algorithm_t mac;
+	gnutls_priority_t cache;
+	uint32_t used = 0;
+
+	ret = gnutls_priority_init(&cache, vpninfo->gnutls_prio, NULL);
+	if (ret < 0) {
+		buf->error = -EIO;
+		return;
+	}
+
+	for (j=0; ; j++) {
+		ret = gnutls_priority_get_cipher_suite_index(cache, j, &idx);
+		if (ret == GNUTLS_E_UNKNOWN_CIPHER_SUITE)
+			continue;
+		else if (ret < 0)
+			break;
+
+		if (gnutls_cipher_suite_info(idx, NULL, NULL, &cipher, &mac, NULL) != NULL) {
+			for (i = 0; i < sizeof(gnutls_dtls_ciphers)/sizeof(gnutls_dtls_ciphers[0]); i++) {
+				if (used & (1 << i))
+					continue;
+				if (gnutls_dtls_ciphers[i].mac == mac && gnutls_dtls_ciphers[i].cipher == cipher) {
+					buf_append(buf, "%s%s", first ? "" : ":",
+						   gnutls_dtls_ciphers[i].name);
+					first = 0;
+					used |= (1 << i);
+					break;
+				}
+			}
+		}
+	}
+
+	gnutls_priority_deinit(cache);
+}
+#endif
 
 #define DTLS_SEND gnutls_record_send
 #define DTLS_RECV gnutls_record_recv
@@ -470,6 +543,8 @@ static int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 	int cipher;
 
 	for (cipher = 0; cipher < sizeof(gnutls_dtls_ciphers)/sizeof(gnutls_dtls_ciphers[0]); cipher++) {
+		if (gnutls_check_version(gnutls_dtls_ciphers[cipher].min_gnutls_version) == NULL)
+			continue;
 		if (!strcmp(vpninfo->dtls_cipher, gnutls_dtls_ciphers[cipher].name))
 			goto found_cipher;
 	}
