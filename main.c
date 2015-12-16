@@ -1954,13 +1954,12 @@ static int process_auth_form_cb(void *_vpninfo,
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_TEXT) {
-			if (username &&
-			    !strcmp(opt->name, "username")) {
+			if (username && !strcmp(opt->name, "username")) {
 				opt->_value = username;
-                // username = NULL;
+				// username = NULL;
 			} else {
 				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
-                username = opt->_value;
+				username = opt->_value;
 			}
 
 			if (!opt->_value)
@@ -1968,44 +1967,47 @@ static int process_auth_form_cb(void *_vpninfo,
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_PASSWORD) {
-            printf("Entering password section...\n");
+			printf("Entering password section...\n");
 
 			if (password && !strcmp(opt->name, "password")) {
 				opt->_value = password;
 				password = NULL;
-            } else if (strcmp(opt->name, "password#2") == 0) {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
+			} else if (strcmp(opt->name, "password#2") == 0) {
+				opt->_value = prompt_for_input(opt->label, vpninfo, 0); // switch last arg to 1 to hide
 				password = NULL;
-            } else {
-                OSStatus status = 0;
-                OSStatus status1 = 0;
-                void *passwordData = nil;  // will be allocated and filled in by SecKeychainFindGenericPassword
-                SecKeychainItemRef itemRef = nil;
-                UInt32 passwordLength = 0;
+			} else if (username) {
+				OSStatus status = 0;
+				OSStatus status1 = 0;
+				void *passwordData = nil;  // will be allocated and filled in by SecKeychainFindGenericPassword
+				SecKeychainItemRef itemRef = nil;
+				UInt32 passwordLength = 0;
 
-                printf("Checking keychain for %s\n", username);
-                status1 = GetPasswordKeychain(username, &passwordData, &passwordLength, &itemRef);
-//              printf("Got password: %s\n", passwordData);
+				char *kc_name = build_keychain_name(username, vpninfo->hostname);
+				printf("Looking for keychain named %s\n", kc_name);
+				status1 = GetPasswordKeychain(kc_name, &passwordData, &passwordLength, &itemRef);
+				// printf("Got password: %s\n", passwordData);
 
-                // If call was successful, authenticate user and continue.
-                if (status1 == noErr) {
-                    opt->_value = passwordData;
-                    // Free the data allocated by SecKeychainFindGenericPassword:
-                    // status = SecKeychainItemFreeContent(NULL, passwordData);
-                }
+				// If call was successful, authenticate user and continue.
+				if (status1 == noErr) {
+					opt->_value = passwordData;
+					// Free the data allocated by SecKeychainFindGenericPassword:
+					// status = SecKeychainItemFreeContent(NULL, passwordData);
+				} else if (status1 == errSecItemNotFound) {  // Is password on keychain?
+					// If password is not on keychain, display dialog to prompt user for name and password.
+					// Authenticate user.  If unsuccessful, prompt user again for name and password.
+					// If successful, ask user whether to store new password on keychain; if no, return.
+					// If yes, store password:
+					printf("No password in keychain for %s. We'll add it now...\n", kc_name);
+					opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+					status = StorePasswordKeychain(kc_name, opt->_value, strlen(opt->_value));
+				} else {
+					opt->_value = nil;
+				}
 
-                // Is password on keychain?
-                if (status1 == errSecItemNotFound) {
-                    /* If password is not on keychain, display dialog to prompt user for name and password.
-                     * Authenticate user.  If unsuccessful, prompt user again for name and password.
-                     * If successful, ask user whether to store new password on keychain; if no, return.
-                     * If yes, store password: */
-                    printf("No password in keychain for %s. We'll add it now.\n", username);
-    				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
-                    status = StorePasswordKeychain(username, opt->_value, strlen(opt->_value));
-                }
-
-                if (itemRef) { CFRelease(itemRef); }
+				if (itemRef) { CFRelease(itemRef); }
+				free(kc_name);
+			} else {
+				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
 			}
 
 			if (!opt->_value)
