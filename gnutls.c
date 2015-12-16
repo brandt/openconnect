@@ -79,6 +79,25 @@ static P11KitPin *p11kit_pin_callback(const char *pin_source, P11KitUri *pin_uri
 #include "gnutls.h"
 #include "openconnect-internal.h"
 
+/* GnuTLS 2.x lacked this. But GNUTLS_E_UNEXPECTED_PACKET_LENGTH basically
+ * does the same thing.
+ * http://lists.infradead.org/pipermail/openconnect-devel/2014-March/001726.html
+ */
+#ifndef GNUTLS_E_PREMATURE_TERMINATION
+#define GNUTLS_E_PREMATURE_TERMINATION GNUTLS_E_UNEXPECTED_PACKET_LENGTH
+#endif
+
+
+/* Compile-time optimisable GnuTLS version check. We should never be
+ * run against a version of GnuTLS which is *older* than the one we
+ * were built again, but we might be run against a version which is
+ * newer. So some ancient compatibility code *can* be dropped at
+ * compile time. Likewise, if building against GnuTLS 2.x then we
+ * can never be running agsinst a 3.x library — the soname changed. */
+#define gtls_ver(a,b,c) ( GNUTLS_VERSION_MAJOR >= (a) &&		\
+	(GNUTLS_VERSION_NUMBER >= ( ((a) << 16) + ((b) << 8) + (c) ) || \
+	 gnutls_check_version(#a "." #b "." #c)))
+
 /* Helper functions for reading/writing lines over SSL. */
 static int openconnect_gnutls_write(struct openconnect_info *vpninfo, char *buf, size_t len)
 {
@@ -140,14 +159,16 @@ static int openconnect_gnutls_read(struct openconnect_info *vpninfo, char *buf, 
 				vpn_progress(vpninfo, PRG_ERR, _("SSL read cancelled\n"));
 				return -EINTR;
 			}
-#ifdef GNUTLS_E_PREMATURE_TERMINATION
 		} else if (done == GNUTLS_E_PREMATURE_TERMINATION) {
 			/* We've seen this with HTTP 1.0 responses followed by abrupt
 			   socket closure and no clean SSL shutdown.
 			   https://bugs.launchpad.net/bugs/1225276 */
 			vpn_progress(vpninfo, PRG_DEBUG, _("SSL socket closed uncleanly\n"));
 			return 0;
-#endif
+		} else if (done == GNUTLS_E_REHANDSHAKE) {
+			int ret = cstp_handshake(vpninfo, 0);
+			if (ret)
+				return ret;
 		} else {
 			vpn_progress(vpninfo, PRG_ERR, _("Failed to read from SSL socket: %s\n"),
 				     gnutls_strerror(done));
@@ -203,6 +224,10 @@ static int openconnect_gnutls_gets(struct openconnect_info *vpninfo, char *buf, 
 				ret = -EINTR;
 				break;
 			}
+		} else if (ret == GNUTLS_E_REHANDSHAKE) {
+			ret = cstp_handshake(vpninfo, 0);
+			if (ret)
+				return ret;
 		} else {
 			vpn_progress(vpninfo, PRG_ERR, _("Failed to read from SSL socket: %s\n"),
 				     gnutls_strerror(ret));
@@ -1574,7 +1599,7 @@ static int load_certificate(struct openconnect_info *vpninfo)
 		err = gnutls_certificate_set_x509_crl(vpninfo->https_cred, &crl, 1);
 		if (err) {
 			vpn_progress(vpninfo, PRG_ERR,
-				     _("Setting certificate recovation list failed: %s\n"),
+				     _("Setting certificate revocation list failed: %s\n"),
 				     gnutls_strerror(err));
 			ret = -EINVAL;
 			goto out;
@@ -1938,6 +1963,24 @@ static int verify_peer(gnutls_session_t session)
 		return GNUTLS_E_CERTIFICATE_ERROR;
 	}
 
+	if (vpninfo->peer_cert) {
+		unsigned char *prev_der = NULL;
+		int der_len = openconnect_get_peer_cert_DER(vpninfo, &prev_der);
+		if (der_len < 0) {
+			vpn_progress(vpninfo, PRG_ERR, _("Error comparing server's cert on rehandshake: %s\n"),
+				     strerror(-der_len));
+			return GNUTLS_E_CERTIFICATE_ERROR;
+		}
+		if (cert_list[0].size != der_len || memcmp(cert_list[0].data, prev_der, der_len)) {
+			vpn_progress(vpninfo, PRG_ERR, _("Server presented different cert on rehandshake\n"));
+			gnutls_free(prev_der);
+			return GNUTLS_E_CERTIFICATE_ERROR;
+		}
+		gnutls_free(prev_der);
+		vpn_progress(vpninfo, PRG_TRACE, _("Server presented identical cert on rehandshake\n"));
+		return 0;
+	}
+
 	err = gnutls_x509_crt_init(&cert);
 	if (err) {
 		vpn_progress(vpninfo, PRG_ERR, _("Error initialising X509 cert structure\n"));
@@ -2008,6 +2051,7 @@ static int verify_peer(gnutls_session_t session)
 		else if (inet_pton(AF_INET6, vpninfo->hostname, addrbuf) > 0)
 			addrlen = 16;
 #endif
+
 		if (!addrlen) {
 			/* vpninfo->hostname was not a bare IP address. Nothing to do */
 			goto badhost;
@@ -2045,46 +2089,11 @@ static int verify_peer(gnutls_session_t session)
 	return err;
 }
 
-/*
- * If a ClientHello is between 256 and 511 bytes, the
- * server cannot distinguish between a SSLv2 formatted
- * packet and a SSLv3 formatted packet.
- *
- * F5 BIG-IP reverse proxies in particular will
- * silently drop an ambiguous ClientHello.
- *
- * GnuTLS fixes this in v3.2.9+ by padding ClientHello
- * packets to at least 512 bytes if %COMPAT or %DUMBFW
- * is specified.
- *
- * Discussion:
- * http://www.ietf.org/mail-archive/web/tls/current/msg10423.html
- *
- * GnuTLS commits:
- * b6d29bb1737f96ac44a8ef9cc9fe7f9837e20465
- * a9bd8c4d3a639c40adb964349297f891f583a21b
- * 531bec47037e882af32963f8461988f8c724919e
- * 7c45ebbdd877cd994b6b938bd6faef19558a01e1
- * 8d28901a3ebd2589d0fc9941475d50f04047f6fe
- * 28065ce3896b1b0f87972d0bce9b17641ebb69b9
- */
-#if GNUTLS_VERSION_NUMBER >= 0x030209
-# define DEFAULT_PRIO "NORMAL:-VERS-SSL3.0:%COMPAT"
-#else
-# define _DEFAULT_PRIO "NORMAL:-VERS-TLS-ALL:+VERS-TLS1.0:" \
-	"%COMPAT:%DISABLE_SAFE_RENEGOTIATION:%LATEST_RECORD_VERSION"
-# if GNUTLS_VERSION_MAJOR >= 3
-#  define DEFAULT_PRIO _DEFAULT_PRIO":-CURVE-ALL:-ECDHE-RSA:-ECDHE-ECDSA"
-#else
-#  define DEFAULT_PRIO _DEFAULT_PRIO
-# endif
-#endif
-
 int openconnect_open_https(struct openconnect_info *vpninfo)
 {
+	const char *default_prio;
 	int ssl_sock = -1;
 	int err;
-	const char * prio;
 
 	if (vpninfo->https_sess)
 		return 0;
@@ -2094,7 +2103,7 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 		vpninfo->peer_cert = NULL;
 	}
 	free(vpninfo->peer_cert_hash);
-	vpninfo->peer_cert_hash = 0;
+	vpninfo->peer_cert_hash = NULL;
 	gnutls_free(vpninfo->cstp_cipher);
 	vpninfo->cstp_cipher = NULL;
 
@@ -2207,24 +2216,59 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 	 *
 	 * See comments above regarding COMPAT and DUMBFW.
 	 */
-	if (gnutls_check_version("3.2.9") &&
-	    string_is_hostname(vpninfo->hostname))
+	if (gtls_ver(3,2,9) && string_is_hostname(vpninfo->hostname))
 		gnutls_server_name_set(vpninfo->https_sess, GNUTLS_NAME_DNS,
 				       vpninfo->hostname,
 				       strlen(vpninfo->hostname));
 
-	if (vpninfo->pfs) {
-		prio = DEFAULT_PRIO":-RSA";
+       /*
+	* If a ClientHello is between 256 and 511 bytes, the
+	* server cannot distinguish between a SSLv2 formatted
+	* packet and a SSLv3 formatted packet.
+	*
+	* F5 BIG-IP reverse proxies in particular will
+	* silently drop an ambiguous ClientHello.
+	*
+	* GnuTLS fixes this in v3.2.9+ by padding ClientHello
+	* packets to at least 512 bytes if %COMPAT or %DUMBFW
+	* is specified.
+	*
+	* Discussion:
+	* http://www.ietf.org/mail-archive/web/tls/current/msg10423.html
+	*
+	* GnuTLS commits:
+	* b6d29bb1737f96ac44a8ef9cc9fe7f9837e20465
+	* a9bd8c4d3a639c40adb964349297f891f583a21b
+	* 531bec47037e882af32963f8461988f8c724919e
+	* 7c45ebbdd877cd994b6b938bd6faef19558a01e1
+	* 8d28901a3ebd2589d0fc9941475d50f04047f6fe
+	* 28065ce3896b1b0f87972d0bce9b17641ebb69b9
+	*/
+
+#ifdef DEFAULT_PRIO
+	default_prio = DEFAULT_PRIO ":%COMPAT";
+#else
+	if (gtls_ver(3,2,9)) {
+		default_prio = "NORMAL:-VERS-SSL3.0:%COMPAT";
+	} else if (gtls_ver(3,0,0)) {
+		default_prio = "NORMAL:-VERS-TLS-ALL:+VERS-TLS1.0:" \
+			"%COMPAT:%DISABLE_SAFE_RENEGOTIATION:%LATEST_RECORD_VERSION" \
+			":-CURVE-ALL:-ECDHE-RSA:-ECDHE-ECDSA";
 	} else {
-		prio = DEFAULT_PRIO;
+		default_prio = "NORMAL:-VERS-TLS-ALL:+VERS-TLS1.0:"			\
+			"%COMPAT:%DISABLE_SAFE_RENEGOTIATION:%LATEST_RECORD_VERSION";
 	}
+#endif
+
+	snprintf(vpninfo->gnutls_prio, sizeof(vpninfo->gnutls_prio), "%s%s",
+		 default_prio, vpninfo->pfs?":-RSA":"");
 
 	err = gnutls_priority_set_direct(vpninfo->https_sess,
-					prio, NULL);
+					 vpninfo->gnutls_prio, NULL);
 	if (err) {
 		vpn_progress(vpninfo, PRG_ERR,
-			     _("Failed to set TLS priority string: %s\n"),
-			     gnutls_strerror(err));
+			     _("Failed to set TLS priority string (\"%s\"): %s\n"),
+			     vpninfo->gnutls_prio, gnutls_strerror(err));
 		gnutls_deinit(vpninfo->https_sess);
 		vpninfo->https_sess = NULL;
 		closesocket(ssl_sock);

@@ -36,6 +36,10 @@
 #include <openssl/ui.h>
 #include <openssl/rsa.h>
 
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+#define X509_up_ref(x) 	CRYPTO_add(&(x)->references, 1, CRYPTO_LOCK_X509)
+#endif
+
 int openconnect_sha1(unsigned char *result, void *data, int len)
 {
 	EVP_MD_CTX c;
@@ -272,6 +276,7 @@ struct ui_form_opt {
 	UI_STRING *uis;
 };
 
+#ifdef HAVE_ENGINE
  /* Ick. But there is no way to pass this sanely through OpenSSL */
 static struct openconnect_info *ui_vpninfo;
 
@@ -414,6 +419,7 @@ static UI_METHOD *create_openssl_ui(struct openconnect_info *vpninfo)
 
 	return ui_method;
 }
+#endif
 
 static int pem_pw_cb(char *buf, int len, int w, void *v)
 {
@@ -464,7 +470,7 @@ static int install_extra_certs(struct openconnect_info *vpninfo, const char *sou
 					  buf, sizeof(buf));
 			vpn_progress(vpninfo, PRG_DEBUG,
 				     _("Extra cert from %s: '%s'\n"), source, buf);
-			CRYPTO_add(&cert2->references, 1, CRYPTO_LOCK_X509);
+			X509_up_ref(cert2);
 			SSL_CTX_add_extra_chain_cert(vpninfo->https_ctx, cert2);
 			cert = cert2;
 			goto next;
@@ -973,6 +979,7 @@ static int set_peer_cert_hash(struct openconnect_info *vpninfo)
 	return 0;
 }
 
+#if OPENSSL_VERSION_NUMBER < 0x10002000L
 static int match_hostname_elem(const char *hostname, int helem_len,
 			       const char *match, int melem_len)
 {
@@ -1041,31 +1048,15 @@ static int match_hostname(const char *hostname, const char *match)
 }
 
 /* cf. RFC2818 and RFC2459 */
-static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert)
+static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert,
+			       const unsigned char *ipaddr, int ipaddrlen)
 {
 	STACK_OF(GENERAL_NAME) *altnames;
 	X509_NAME *subjname;
 	ASN1_STRING *subjasn1;
 	char *subjstr = NULL;
-	int addrlen = 0;
 	int i, altdns = 0;
-	char addrbuf[sizeof(struct in6_addr)];
 	int ret;
-
-	/* Allow GEN_IP in the certificate only if we actually connected
-	   by IP address rather than by name. */
-	if (inet_pton(AF_INET, vpninfo->hostname, addrbuf) > 0)
-		addrlen = 4;
-	else if (inet_pton(AF_INET6, vpninfo->hostname, addrbuf) > 0)
-		addrlen = 16;
-	else if (vpninfo->hostname[0] == '[' &&
-		 vpninfo->hostname[strlen(vpninfo->hostname)-1] == ']') {
-		char *p = &vpninfo->hostname[strlen(vpninfo->hostname)-1];
-		*p = 0;
-		if (inet_pton(AF_INET6, vpninfo->hostname + 1, addrbuf) > 0)
-			addrlen = 16;
-		*p = ']';
-	}
 
 	altnames = X509_get_ext_d2i(peer_cert, NID_subject_alt_name,
 				    NULL, NULL);
@@ -1098,7 +1089,7 @@ static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert
 					     str);
 			}
 			OPENSSL_free(str);
-		} else if (this->type == GEN_IPADD && addrlen) {
+		} else if (this->type == GEN_IPADD && ipaddrlen) {
 			char host[80];
 			int family;
 
@@ -1116,8 +1107,8 @@ static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert
 			/* We only do this for the debug messages */
 			inet_ntop(family, this->d.ip->data, host, sizeof(host));
 
-			if (this->d.ip->length == addrlen &&
-			    !memcmp(addrbuf, this->d.ip->data, addrlen)) {
+			if (this->d.ip->length == ipaddrlen &&
+			    !memcmp(ipaddr, this->d.ip->data, ipaddrlen)) {
 				vpn_progress(vpninfo, PRG_DEBUG,
 					     _("Matched %s address '%s'\n"),
 					     (family == AF_INET6) ? "IPv6" : "IPv4",
@@ -1156,7 +1147,7 @@ static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert
 
 			/* Leave url_host as it was so that it can be freed */
 			url_host2 = url_host;
-			if (addrlen == 16 && vpninfo->hostname[0] != '[' &&
+			if (ipaddrlen == 16 && vpninfo->hostname[0] != '[' &&
 			    url_host[0] == '[' && url_host[strlen(url_host)-1] == ']') {
 				/* Cope with https://[IPv6]/ when the hostname is bare IPv6 */
 				url_host[strlen(url_host)-1] = 0;
@@ -1246,34 +1237,47 @@ static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert
 	OPENSSL_free(subjstr);
 	return ret;
 }
-
-static int verify_peer(struct openconnect_info *vpninfo, SSL *https_ssl)
+#else
+static int match_cert_hostname(struct openconnect_info *vpninfo, X509 *peer_cert,
+			       const unsigned char *ipaddr, int ipaddrlen)
 {
-	int ret;
-	int vfy = SSL_get_verify_result(https_ssl);
-	const char *err_string = NULL;
+	char *matched = NULL;
 
-	if (vfy != X509_V_OK)
-		err_string = X509_verify_cert_error_string(vfy);
-	else if (match_cert_hostname(vpninfo, vpninfo->peer_cert))
-		err_string = _("certificate does not match hostname");
+	if (ipaddrlen && X509_check_ip(peer_cert, ipaddr, ipaddrlen, 0)) {
+		if (vpninfo->verbose >= PRG_DEBUG) {
+			char host[80];
+			int family;
 
-	if (err_string) {
-		vpn_progress(vpninfo, PRG_INFO,
-			     _("Server certificate verify failed: %s\n"),
-			     err_string);
+			if (ipaddrlen == 4)
+				family = AF_INET;
+			else
+				family = AF_INET6;
 
-		if (vpninfo->validate_peer_cert)
-			ret = vpninfo->validate_peer_cert(vpninfo->cbdata,
-							  err_string);
-		else
-			ret = -EINVAL;
-	} else {
-		ret = 0;
+			inet_ntop(family, ipaddr, host, sizeof(host));
+			vpn_progress(vpninfo, PRG_DEBUG,
+				     _("Matched %s address '%s'\n"),
+				     (family == AF_INET6) ? "IPv6" : "IPv4",
+				     host);
+		}
+		return 0;
+	}
+	if (X509_check_host(peer_cert, vpninfo->hostname, 0, 0, &matched)) {
+		vpn_progress(vpninfo, PRG_DEBUG,
+			     _("Matched peer certificate subject name '%s'\n"),
+			     matched);
+		OPENSSL_free(matched);
+		return 0;
 	}
 
-	return ret;
+	/* We do it like this because these two strings are already
+	 * translated in gnutls.c */
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("Server certificate verify failed: %s\n"),
+		     _("certificate does not match hostname"));
+
+	return -EINVAL;
 }
+#endif /* OpenSSL < 1.0.2 */
 
 /* Before OpenSSL 1.1 we could do this directly. And needed to. */
 #ifndef SSL_CTX_get_extra_chain_certs_only
@@ -1321,15 +1325,62 @@ static void workaround_openssl_certchain_bug(struct openconnect_info *vpninfo,
 	X509_STORE_CTX_cleanup(&ctx);
 }
 
-#if OPENSSL_VERSION_NUMBER >= 0x00908000
 static int ssl_app_verify_callback(X509_STORE_CTX *ctx, void *arg)
 {
-	/* We've seen certificates in the wild which don't have the
-	   purpose fields filled in correctly */
-	X509_VERIFY_PARAM_set_purpose(ctx->param, X509_PURPOSE_ANY);
-	return X509_verify_cert(ctx);
+	struct openconnect_info *vpninfo = arg;
+	const char *err_string = NULL;
+
+	if (vpninfo->peer_cert) {
+		/* This is a *rehandshake*. Require that the server
+		 * presents exactly the same certificate as the
+		 * first time. */
+		if (X509_cmp(ctx->cert, vpninfo->peer_cert)) {
+			vpn_progress(vpninfo, PRG_ERR, _("Server presented different cert on rehandshake\n"));
+			return 0;
+		}
+		vpn_progress(vpninfo, PRG_TRACE, _("Server presented identical cert on rehandshake\n"));
+		return 1;
+	}
+	vpninfo->peer_cert = ctx->cert;
+	X509_up_ref(ctx->cert);
+
+	set_peer_cert_hash(vpninfo);
+
+	if (!X509_verify_cert(ctx)) {
+		err_string = X509_verify_cert_error_string(X509_STORE_CTX_get_error(ctx));
+	} else {
+		unsigned char addrbuf[sizeof(struct in6_addr)];
+		int addrlen = 0;
+
+		if (inet_pton(AF_INET, vpninfo->hostname, addrbuf) > 0)
+			addrlen = 4;
+		else if (inet_pton(AF_INET6, vpninfo->hostname, addrbuf) > 0)
+			addrlen = 16;
+		else if (vpninfo->hostname[0] == '[' &&
+			 vpninfo->hostname[strlen(vpninfo->hostname)-1] == ']') {
+			char *p = &vpninfo->hostname[strlen(vpninfo->hostname)-1];
+			*p = 0;
+			if (inet_pton(AF_INET6, vpninfo->hostname + 1, addrbuf) > 0)
+				addrlen = 16;
+			*p = ']';
+		}
+
+		if (match_cert_hostname(vpninfo, vpninfo->peer_cert, addrbuf, addrlen))
+			err_string = _("certificate does not match hostname");
+		else
+			return 1;
+	}
+
+	vpn_progress(vpninfo, PRG_INFO,
+		     _("Server certificate verify failed: %s\n"),
+		     err_string);
+
+	if (vpninfo->validate_peer_cert &&
+	    !vpninfo->validate_peer_cert(vpninfo->cbdata, err_string))
+		return 1;
+
+	return 0;
 }
-#endif
 
 static int check_certificate_expiry(struct openconnect_info *vpninfo)
 {
@@ -1421,18 +1472,12 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 			check_certificate_expiry(vpninfo);
 		}
 
-		/* We just want to do:
-		   SSL_CTX_set_purpose(vpninfo->https_ctx, X509_PURPOSE_ANY);
-		   ... but it doesn't work with OpenSSL < 0.9.8k because of
-		   problems with inheritance (fixed in v1.1.4.6 of
-		   crypto/x509/x509_vpm.c) so we have to play silly buggers
-		   instead. This trick doesn't work _either_ in < 0.9.7 but
-		   I don't know of _any_ workaround which will, and can't
-		   be bothered to find out either. */
-#if OPENSSL_VERSION_NUMBER >= 0x00908000
+		/* We've seen certificates in the wild which don't have the
+		   purpose fields filled in correctly */
+		SSL_CTX_set_purpose(vpninfo->https_ctx, X509_PURPOSE_ANY);
 		SSL_CTX_set_cert_verify_callback(vpninfo->https_ctx,
-						 ssl_app_verify_callback, NULL);
-#endif
+						 ssl_app_verify_callback, vpninfo);
+
 		if (!vpninfo->no_system_trust)
 			SSL_CTX_set_default_verify_paths(vpninfo->https_ctx);
 
@@ -1508,7 +1553,6 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 	https_bio = BIO_new_socket(ssl_sock, BIO_NOCLOSE);
 	BIO_set_nbio(https_bio, 1);
 	SSL_set_bio(https_ssl, https_bio, https_bio);
-
 	/*
 	 * If a ClientHello is between 256 and 511 bytes, the
 	 * server cannot distinguish between a SSLv2 formatted
@@ -1534,6 +1578,7 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 	if (string_is_hostname(vpninfo->hostname))
 		SSL_set_tlsext_host_name(https_ssl, vpninfo->hostname);
 #endif
+	SSL_set_verify(https_ssl, SSL_VERIFY_PEER, NULL);
 
 	vpn_progress(vpninfo, PRG_INFO, _("SSL negotiation with %s\n"),
 		     vpninfo->hostname);
@@ -1569,14 +1614,6 @@ int openconnect_open_https(struct openconnect_info *vpninfo)
 	}
 
 	vpninfo->cstp_cipher = (char *)SSL_get_cipher_name(https_ssl);
-	vpninfo->peer_cert = SSL_get_peer_certificate(https_ssl);
-	set_peer_cert_hash(vpninfo);
-
-	if (verify_peer(vpninfo, https_ssl)) {
-		SSL_free(https_ssl);
-		closesocket(ssl_sock);
-		return -EINVAL;
-	}
 
 	vpninfo->ssl_fd = ssl_sock;
 	vpninfo->https_ssl = https_ssl;

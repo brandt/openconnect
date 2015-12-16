@@ -34,6 +34,8 @@
 /*
  * API version 5.3:
  *  - Add openconnect_override_getaddrinfo().
+ *  - Add openconnect_get_cstp_compression().
+ *  - Add openconnect_get_dtls_compression().
  *
  * API version 5.2:
  *  - Add openconnect_set_http_auth(), openconnect_set_protocol().
@@ -77,7 +79,7 @@
  *    openconnect_get_ifname(), openconnect_set_reqmtu(),
  *    openconnect_get_ip_info(), openconnect_set_protect_socket_handler(),
  *    openconnect_set_mobile_info(), openconnect_set_xmlpost(),
-7 *    openconnect_set_stats_handler()
+ *    openconnect_set_stats_handler()
  *
  * API version 3.0:
  *  - Change oc_form_opt_select->choices to an array of pointers
@@ -125,7 +127,7 @@
  * 3) Add function to libopenconnect.map.in
  * 4) Add declaration + comments in the latter part of this file
  * 5) Add function to jni.c, then test with ./configure --with-java && make
- * 6) Add declaration to LibOpenConnect.java, then run "ant" to test
+ * 6) Add declaration to LibOpenConnect.java, then run "cd java && ant" to test
  */
 
 /* Before API version 1.4 (OpenConnect 3.19) this macro didn't exist.
@@ -364,6 +366,11 @@ int openconnect_init_ssl(void);
  * ask for an API that *does* offer you what you need. */
 const char *openconnect_get_cstp_cipher(struct openconnect_info *);
 const char *openconnect_get_dtls_cipher(struct openconnect_info *);
+
+/* These return a descriptive string of the compression algorithm 
+ * in use (LZS, LZ4, ...). If no compression then NULL is returned. */
+const char *openconnect_get_cstp_compression(struct openconnect_info *);
+const char *openconnect_get_dtls_compression(struct openconnect_info *);
 
 const char *openconnect_get_hostname(struct openconnect_info *);
 int openconnect_set_hostname(struct openconnect_info *, const char *);
