@@ -1973,7 +1973,7 @@ static int process_auth_form_cb(void *_vpninfo,
 				opt->_value = password;
 				password = NULL;
 			} else if (strcmp(opt->name, "password#2") == 0) {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 0); // switch last arg to 1 to hide
+				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
 				password = NULL;
 			} else if (username) {
 				OSStatus status = 0;
@@ -2007,7 +2007,7 @@ static int process_auth_form_cb(void *_vpninfo,
 				if (itemRef) { CFRelease(itemRef); }
 				free(kc_name);
 			} else {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
+				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
 			}
 
 			if (!opt->_value)
