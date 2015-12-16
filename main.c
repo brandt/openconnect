@@ -239,6 +239,18 @@ OSStatus ChangePasswordKeychain(SecKeychainItemRef itemRef, const char *password
     return (status);
 }
 
+char *build_keychain_name(const char *user, const char *domain) {
+    char *login_name;
+    int size = 0;
+    size = asprintf(&login_name, "%s@%s", user, domain);
+    if (size == -1) {
+        fprintf(stderr, _("Error allocating memory for login name\n"));
+        exit(1);
+    }
+    return login_name;
+}
+
+
 #ifdef __sun__
 /*
  * The 'name' field in Solaris 'struct option' lacks the 'const', and causes
