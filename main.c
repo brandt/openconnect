@@ -56,18 +56,15 @@
 #include <termios.h>
 #endif
 
-#include <CoreFoundation/CoreFoundation.h>
-#include <Security/Security.h>
-#include <CoreServices/CoreServices.h>
-
 #ifdef HAVE_NL_LANGINFO
 #include <langinfo.h>
 
 static const char *legacy_charset;
 #endif
 
-#define SERVICE_NAME "openconnect"
-
+#ifdef __APPLE__
+#include "keychain.h"
+#endif
 
 static int write_new_config(void *_vpninfo,
 			    const char *buf, int buflen);
@@ -97,6 +94,7 @@ static char *token_filename;
 static char *server_cert = NULL;
 
 static char *username;
+static char *keychain;
 static char *password;
 static char *authgroup;
 static int authgroup_set;
@@ -193,62 +191,6 @@ enum {
 	OPT_PROXY_AUTH,
 	OPT_HTTP_AUTH,
 };
-
-// Call SecKeychainAddGenericPassword to add a new password to the keychain:
-OSStatus StorePasswordKeychain(char *username, void *password, UInt32 passwordLength) {
-    OSStatus status;
-    status = SecKeychainAddGenericPassword(
-                                            NULL,                           // default keychain
-                                            strlen(SERVICE_NAME),           // length of service name
-                                            SERVICE_NAME,                   // service name
-                                            (unsigned int)strlen(username), // length of account name
-                                            username,                       // account name
-                                            passwordLength,                 // length of password
-                                            password,                       // pointer to password data
-                                            NULL                            // the item reference
-                                            );
-    return (status);
-}
-
-// Call SecKeychainFindGenericPassword to get a password from the keychain:
-OSStatus GetPasswordKeychain(char *username, void *passwordData, UInt32 *passwordLength, SecKeychainItemRef *itemRef) {
-    OSStatus status1;
-    status1 = SecKeychainFindGenericPassword(
-                                              NULL,                           // default keychain
-                                              strlen(SERVICE_NAME),           // length of service name
-                                              SERVICE_NAME,                   // service name
-                                              (unsigned int)strlen(username), // length of account name
-                                              username,                       // account name
-                                              passwordLength,                 // length of password
-                                              passwordData,                   // pointer to password data
-                                              itemRef                         // the item reference
-                                              );
-    return (status1);
-}
-
-// Call SecKeychainItemModifyAttributesAndData to change the password for
-// an item already in the keychain:
-OSStatus ChangePasswordKeychain(SecKeychainItemRef itemRef, const char *password) {
-    OSStatus status;
-    status = SecKeychainItemModifyAttributesAndData(
-                                                     itemRef,                         // the item reference
-                                                     NULL,                            // no change to attributes
-                                                     (unsigned int)strlen(password),  // length of password
-                                                     password                         // pointer to password data
-                                                     );
-    return (status);
-}
-
-char *build_keychain_name(const char *user, const char *domain) {
-    char *login_name;
-    int size = 0;
-    size = asprintf(&login_name, "%s@%s", user, domain);
-    if (size == -1) {
-        fprintf(stderr, _("Error allocating memory for login name\n"));
-        exit(1);
-    }
-    return login_name;
-}
 
 
 #ifdef __sun__
@@ -1955,63 +1897,65 @@ static int process_auth_form_cb(void *_vpninfo,
 
 		} else if (opt->type == OC_FORM_OPT_TEXT) {
 			if (username && !strcmp(opt->name, "username")) {
-				opt->_value = username;
-				// username = NULL;
+				opt->_value = username;  // fill-in the form
+				username = NULL;
 			} else {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
-				username = opt->_value;
+				username = prompt_for_input(opt->label, vpninfo, 0);
+				opt->_value = username;
 			}
 
-			if (!opt->_value)
+			if (!opt->_value) {
 				goto err;
+			} else {
+				// we want to reset the keychain name any time username was provided
+				keychain = build_keychain_name(opt->_value, vpninfo->hostname);
+			}
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_PASSWORD) {
 			printf("Entering password section...\n");
 
-			if (password && !strcmp(opt->name, "password")) {
-				opt->_value = password;
-				password = NULL;
-			} else if (strcmp(opt->name, "password#2") == 0) {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
-				password = NULL;
-			} else if (username) {
-				OSStatus status = 0;
-				OSStatus status1 = 0;
-				void *passwordData = nil;  // will be allocated and filled in by SecKeychainFindGenericPassword
-				SecKeychainItemRef itemRef = nil;
-				UInt32 passwordLength = 0;
+			if (!strcmp(opt->name, "password")) {
+				if (password) {  // We already know the password
+					opt->_value = password;
+					password = NULL;
+				} else if (keychain) {
+					unsigned int pass_len = 0;
+					char *kc_err;
+					int kc_status = 0;
+					int kc_add_status = 0;
+					kc_status = keychain_find(&kc_err, "openconnect", keychain, &pass_len, &password);
 
-				char *kc_name = build_keychain_name(username, vpninfo->hostname);
-				printf("Looking for keychain named %s\n", kc_name);
-				status1 = GetPasswordKeychain(kc_name, &passwordData, &passwordLength, &itemRef);
-				// printf("Got password: %s\n", passwordData);
+					if (kc_status == 0) {
+						opt->_value = password;  // success
+					} else if (kc_status == -1) {
+						printf("No password in keychain for %s. We'll add it now...\n", keychain);
+						password = prompt_for_input(opt->label, vpninfo, 1);
+						kc_add_status = keychain_add(&kc_err, "openconnect", keychain, password);
+						if (kc_add_status != 0) {
+							fprintf(stderr, _("Error adding item to keychain: %s\n"), kc_err);
+							exit(1);
+						}
+					} else {  // keychain_find() returned kc_status <= -2
+						fprintf(stderr, _("Error fetching keychain item: %s\n"), kc_err);
+						password = prompt_for_input(opt->label, vpninfo, 1);
+					}
 
-				// If call was successful, authenticate user and continue.
-				if (status1 == noErr) {
-					opt->_value = passwordData;
-					// Free the data allocated by SecKeychainFindGenericPassword:
-					// status = SecKeychainItemFreeContent(NULL, passwordData);
-				} else if (status1 == errSecItemNotFound) {  // Is password on keychain?
-					// If password is not on keychain, display dialog to prompt user for name and password.
-					// Authenticate user.  If unsuccessful, prompt user again for name and password.
-					// If successful, ask user whether to store new password on keychain; if no, return.
-					// If yes, store password:
-					printf("No password in keychain for %s. We'll add it now...\n", kc_name);
-					opt->_value = prompt_for_input(opt->label, vpninfo, 1);
-					status = StorePasswordKeychain(kc_name, opt->_value, strlen(opt->_value));
+					opt->_value = password;
+					password = NULL;
 				} else {
-					opt->_value = nil;
+					// For some reason we don't know the user@fqdn keychain name anymore
+					fprintf(stderr, _("Error determining keychain name.\n"));
+					opt->_value = prompt_for_input(opt->label, vpninfo, 1);
 				}
-
-				if (itemRef) { CFRelease(itemRef); }
-				free(kc_name);
 			} else {
+				// This isn't the "password" field; probably "password#2"
 				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
 			}
 
-			if (!opt->_value)
+			if (!opt->_value) {
 				goto err;
+			}
 			empty = 0;
 		} else if (opt->type == OC_FORM_OPT_TOKEN) {
 			/* Nothing to do here, but if the tokencode is being
