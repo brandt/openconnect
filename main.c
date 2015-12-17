@@ -1927,8 +1927,7 @@ static int process_auth_form_cb(void *_vpninfo,
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_PASSWORD) {
-			printf("Entering password section...\n");
-
+			// printf("Entering password section...\n");
 			if (!strcmp(opt->name, "password")) {
 				if (password) {  // We already know the password
 					opt->_value = password;
