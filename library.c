@@ -413,6 +413,11 @@ void openconnect_set_xmlsha1(struct openconnect_info *vpninfo,
 	memcpy(&vpninfo->xmlsha1, xmlsha1, size);
 }
 
+void openconnect_disable_ipv6(struct openconnect_info *vpninfo)
+{
+	vpninfo->disable_ipv6 = 1;
+}
+
 int openconnect_set_cafile(struct openconnect_info *vpninfo, const char *cafile)
 {
 	UTF8CHECK(cafile);
@@ -462,8 +467,10 @@ int openconnect_get_ip_info(struct openconnect_info *vpninfo,
 int openconnect_setup_csd(struct openconnect_info *vpninfo, uid_t uid,
 			  int silent, const char *wrapper)
 {
+#ifndef _WIN32
 	vpninfo->uid_csd = uid;
 	vpninfo->uid_csd_given = silent ? 2 : 1;
+#endif
 	STRDUP(vpninfo->csd_wrapper, wrapper);
 
 	return 0;
