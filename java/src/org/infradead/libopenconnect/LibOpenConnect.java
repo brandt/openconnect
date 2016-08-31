@@ -62,6 +62,8 @@ public abstract class LibOpenConnect {
 	public void onStatsUpdate(VPNStats stats) { }
 	public int onTokenLock() { return 0; }
 	public int onTokenUnlock(String newToken) { return 0; }
+	public void onSetupTun() { }
+	public void onReconnected() { }
 
 	/* create/destroy library instances */
 
@@ -120,6 +122,7 @@ public abstract class LibOpenConnect {
 	public synchronized native void setXMLSHA1(String hash);
 	public synchronized native void setHostname(String hostname);
 	public synchronized native void setUrlpath(String urlpath);
+	public synchronized native void setLocalName(String localName);
 	public synchronized native void setCAFile(String caFile);
 	public synchronized native void setReportedOS(String os);
 	public synchronized native void setMobileInfo(String mobilePlatformVersion,
@@ -136,6 +139,7 @@ public abstract class LibOpenConnect {
 	/* connection info */
 
 	public synchronized native String getHostname();
+	public synchronized native String getDNSName();
 	public synchronized native String getUrlpath();
 	public synchronized native int getPort();
 	public synchronized native String getCookie();
@@ -152,6 +156,7 @@ public abstract class LibOpenConnect {
 	public synchronized native String getPeerCertHash();
 	public synchronized native String getPeerCertDetails();
 	public synchronized native byte[] getPeerCertDER();
+	public synchronized native byte[][] getPeerCertChain();
 
 	/* library info */
 
@@ -231,6 +236,7 @@ public abstract class LibOpenConnect {
 		public ArrayList<String> NBNS = new ArrayList<String>();
 		public String domain;
 		public String proxyPac;
+		public String gatewayAddr;
 		public int MTU;
 
 		public ArrayList<String> splitDNS = new ArrayList<String>();

@@ -50,7 +50,7 @@ int tun_mainloop(struct openconnect_info *vpninfo, int *timeout)
 	struct pkt *this;
 	int work_done = 0;
 
-	if (!vpninfo->tun_is_up) {
+	if (!tun_is_up(vpninfo)) {
 		/* no tun yet, clear any queued packets */
 		while ((this = dequeue_packet(&vpninfo->incoming_queue)));
 		return 0;
@@ -110,6 +110,12 @@ static int setup_tun_device(struct openconnect_info *vpninfo)
 {
 	int ret;
 
+	if (vpninfo->setup_tun) {
+		vpninfo->setup_tun(vpninfo->cbdata);
+		if (tun_is_up(vpninfo))
+			return 0;
+	}
+
 #ifndef _WIN32
 	if (vpninfo->use_tun_script) {
 		ret = openconnect_setup_tun_script(vpninfo, vpninfo->vpnc_script);
@@ -125,7 +131,7 @@ static int setup_tun_device(struct openconnect_info *vpninfo)
 		return ret;
 	}
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__native_client__)
 	if (vpninfo->uid != getuid()) {
 		int e;
 
@@ -168,7 +174,6 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 {
 	int ret = 0;
 
-	vpninfo->tun_is_up = 0;
 	vpninfo->reconnect_timeout = reconnect_timeout;
 	vpninfo->reconnect_interval = reconnect_interval;
 
@@ -190,7 +195,7 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 
 		/* If tun is not up, loop more often to detect
 		 * a DTLS timeout (due to a firewall block) as soon. */
-		if (vpninfo->tun_is_up)
+		if (tun_is_up(vpninfo))
 			timeout = INT_MAX;
 		else
 			timeout = 1000;
@@ -200,31 +205,27 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 			 * we have a better knowledge of the link MTU. We also
 			 * force the creation if DTLS enters sleeping mode - i.e.,
 			 * we failed to connect on time. */
-			if (vpninfo->tun_is_up == 0 && (vpninfo->dtls_state == DTLS_CONNECTED || 
+			if (!tun_is_up(vpninfo) && (vpninfo->dtls_state == DTLS_CONNECTED ||
 			    vpninfo->dtls_state == DTLS_SLEEPING)) {
 				ret = setup_tun_device(vpninfo);
 				if (ret) {
 					break;
 				}
-
-				vpninfo->tun_is_up = 1;
 			}
 
-			ret = vpninfo->proto.udp_mainloop(vpninfo, &timeout);
+			ret = vpninfo->proto->udp_mainloop(vpninfo, &timeout);
 			if (vpninfo->quit_reason)
 				break;
 			did_work += ret;
 
-		} else if (vpninfo->tun_is_up == 0) {
+		} else if (!tun_is_up(vpninfo)) {
 			/* No DTLS - setup TUN device unconditionally */
 			ret = setup_tun_device(vpninfo);
 			if (ret)
 				break;
-
-			vpninfo->tun_is_up = 1;
 		}
 
-		ret = vpninfo->proto.tcp_mainloop(vpninfo, &timeout);
+		ret = vpninfo->proto->tcp_mainloop(vpninfo, &timeout);
 		if (vpninfo->quit_reason)
 			break;
 		did_work += ret;
@@ -250,8 +251,8 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 			/* close all connections and wait for the user to call
 			   openconnect_mainloop() again */
 			openconnect_close_https(vpninfo, 0);
-			if (vpninfo->dtls_state != DTLS_DISABLED) {
-				vpninfo->proto.udp_close(vpninfo);
+			if (vpninfo->dtls_state > DTLS_DISABLED) {
+				vpninfo->proto->udp_close(vpninfo);
 				vpninfo->dtls_state = DTLS_SLEEPING;
 				vpninfo->new_dtls_started = 0;
 			}
@@ -302,10 +303,10 @@ int openconnect_mainloop(struct openconnect_info *vpninfo,
 #endif
 	}
 
-	if (vpninfo->quit_reason && vpninfo->proto.vpn_close_session)
-		vpninfo->proto.vpn_close_session(vpninfo, vpninfo->quit_reason);
+	if (vpninfo->quit_reason && vpninfo->proto->vpn_close_session)
+		vpninfo->proto->vpn_close_session(vpninfo, vpninfo->quit_reason);
 
-	if (vpninfo->tun_is_up)
+	if (tun_is_up(vpninfo))
 		os_shutdown_tun(vpninfo);
 	return ret < 0 ? ret : -EIO;
 }

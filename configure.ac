@@ -1,4 +1,4 @@
-AC_INIT(openconnect, 7.06)
+AC_INIT(openconnect, 7.07)
 AC_CONFIG_HEADERS([config.h])
 
 PKG_PROG_PKG_CONFIG
@@ -29,7 +29,7 @@ symver_win32_strerror=
 enable_apple_keychain=
 
 case $host_os in
- *linux* | *gnu*)
+ *linux* | *gnu* | *nacl*)
     AC_MSG_NOTICE([Applying feature macros for GNU build])
     AC_DEFINE(_POSIX_C_SOURCE, 200112L, [_POSIX_C_SOURCE])
     # For asprintf()
@@ -125,6 +125,7 @@ AC_DEFINE_UNQUOTED(DEFAULT_VPNCSCRIPT, "${with_vpnc_script}", [Default vpnc-scri
 AC_SUBST(DEFAULT_VPNCSCRIPT, "${with_vpnc_script}")
 
 AC_CHECK_FUNC(fdevname_r, [AC_DEFINE(HAVE_FDEVNAME_R, 1, [Have fdevname_r() function])], [])
+AC_CHECK_FUNC(statfs, [AC_DEFINE(HAVE_STATFS, 1, [Have statfs() function])], [])
 AC_CHECK_FUNC(getline, [AC_DEFINE(HAVE_GETLINE, 1, [Have getline() function])],
     [symver_getline="openconnect__getline;"])
 AC_CHECK_FUNC(strcasestr, [AC_DEFINE(HAVE_STRCASESTR, 1, [Have strcasestr() function])], [])
@@ -193,6 +194,16 @@ AC_CHECK_FUNC(inet_aton, [], AC_CHECK_LIB(nsl, inet_aton, [], have_inet_aton=no)
 if test "$have_inet_aton" = "yes"; then
    AC_DEFINE(HAVE_INET_ATON, 1, [Have inet_aton()])
 fi
+
+AC_MSG_CHECKING([for IPV6_PATHMTU socket option])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([
+		  #include <netinet/in.h>
+		  #include <sys/socket.h>
+		  #include <sys/types.h>],[
+		  int foo = IPV6_PATHMTU; (void)foo;])],
+		  [AC_DEFINE(HAVE_IPV6_PATHMTU, 1, [Have IPV6_PATHMTU socket option])
+		   AC_MSG_RESULT([yes])],
+		  [AC_MSG_RESULT([no])])
 
 AC_CHECK_FUNC(__android_log_vprint, [], AC_CHECK_LIB(log, __android_log_vprint, [], []))
 
@@ -380,6 +391,8 @@ if test "$with_gnutls" = "yes"; then
 		 [AC_DEFINE(HAVE_GNUTLS_PUBKEY_EXPORT2, 1, [autoheader sucks donkey balls])], [])
     AC_CHECK_FUNC(gnutls_x509_crt_set_pin_function,
 		 [AC_DEFINE(HAVE_GNUTLS_X509_CRT_SET_PIN_FUNCTION, 1, [From GnuTLS 3.1.0])], [])
+    AC_CHECK_FUNC(gnutls_url_is_supported,
+		 [AC_DEFINE(HAVE_GNUTLS_URL_IS_SUPPORTED, 1, [From GnuTLS 3.1.0])], [])
     AC_CHECK_FUNC(gnutls_system_key_add_x509,
 		 [AC_DEFINE(HAVE_GNUTLS_SYSTEM_KEYS, 1, [From GnuTLS 3.4.0])], [])
     if test "$with_openssl" = "" || test "$with_openssl" = "no"; then
@@ -464,7 +477,7 @@ if test "$with_openssl" = "yes" || test "$with_openssl" = "" || test "$ssl_libra
         ssl_library=openssl
     fi
 elif test "$with_openssl" != "no" ; then
-    OPENSSL_CFLAGS="-I${with_openssl}/include"
+    OPENSSL_CFLAGS="-I${with_openssl}/include ${OPENSSL_CFLAGS}"
     OPENSSL_LIBS="${with_openssl}/libssl.a ${with_openssl}/libcrypto.a -ldl -lz"
     AC_SUBST(OPENSSL_CFLAGS)
     AC_SUBST(OPENSSL_LIBS)
@@ -588,11 +601,10 @@ AC_ARG_WITH(lz4,
   test_for_lz4=$withval,
   test_for_lz4=yes)
 
-enable_lz4=no
-if test "$test_for_lz4" = yes;then
+if test "$test_for_lz4" = yes; then
 PKG_CHECK_MODULES([LIBLZ4], [liblz4], [
-enable_lz4=yes
-AC_DEFINE([HAVE_LZ4], [], [LZ4 was found])
+	AC_SUBST(LIBLZ4_PC, liblz4)
+	AC_DEFINE([HAVE_LZ4], [], [LZ4 was found])
 ],
 [
 	AC_MSG_WARN([[
@@ -993,6 +1005,10 @@ if test "${build_www}" = "yes"; then
 fi
 AM_CONDITIONAL(BUILD_WWW, [test "${build_www}" = "yes"])
 
+# Checks for tests
+PKG_CHECK_MODULES([CWRAP], [uid_wrapper, socket_wrapper], have_cwrap=yes, have_cwrap=no)
+AM_CONDITIONAL(HAVE_CWRAP, test "x$have_cwrap" != xno)
+
 AC_SUBST([CONFIG_STATUS_DEPENDENCIES], ['$(top_srcdir)/po/LINGUAS $(top_srcdir)/openconnect.h ${top_srcdir}/libopenconnect.map.in'])
 RAWLINGUAS=`sed -e "/^#/d" -e "s/#.*//" "${srcdir}/po/LINGUAS"`
 # Remove newlines
@@ -1019,5 +1035,5 @@ AC_SUBST(GITVERSIONDEPS)
 
 AC_CONFIG_FILES(Makefile openconnect.pc po/Makefile www/Makefile \
 		libopenconnect.map openconnect.8 www/styles/Makefile \
-		www/inc/Makefile www/images/Makefile)
+		www/inc/Makefile www/images/Makefile tests/Makefile)
 AC_OUTPUT

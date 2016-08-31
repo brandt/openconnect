@@ -45,7 +45,8 @@ static PKCS11_CTX *pkcs11_ctx(struct openconnect_info *vpninfo)
 		}
 		if (PKCS11_CTX_load(ctx, DEFAULT_PKCS11_MODULE) < 0) {
 			vpn_progress(vpninfo, PRG_ERR,
-				     _("Failed to load PKCS#11 provider module (p11-kit-proxy.so):\n"));
+				     _("Failed to load PKCS#11 provider module (%s):\n"),
+				     DEFAULT_PKCS11_MODULE);
 			openconnect_report_ssl_errors(vpninfo);
 			PKCS11_CTX_free(ctx);
 			return NULL;
@@ -305,7 +306,7 @@ static PKCS11_CERT *slot_find_cert(struct openconnect_info *vpninfo, PKCS11_CTX 
 
 int load_pkcs11_certificate(struct openconnect_info *vpninfo)
 {
-	PKCS11_CTX *ctx = pkcs11_ctx(vpninfo);
+	PKCS11_CTX *ctx;
 	PKCS11_TOKEN *match_tok = NULL;
 	PKCS11_CERT *cert;
 	char *cert_label = NULL;
@@ -314,6 +315,10 @@ int load_pkcs11_certificate(struct openconnect_info *vpninfo)
 	PKCS11_SLOT *slot_list = NULL, *slot, *login_slot = NULL;
 	unsigned int slot_count, matching_slots = 0;
 	int ret = 0;
+
+	ctx = pkcs11_ctx(vpninfo);
+	if (!ctx)
+		return -EIO;
 
 	if (parse_pkcs11_uri(vpninfo->cert, &match_tok, &cert_id,
 			     &cert_id_len, &cert_label) < 0) {
@@ -456,7 +461,7 @@ static PKCS11_KEY *slot_find_key(struct openconnect_info *vpninfo, PKCS11_CTX *c
 
 int load_pkcs11_key(struct openconnect_info *vpninfo)
 {
-	PKCS11_CTX *ctx = pkcs11_ctx(vpninfo);
+	PKCS11_CTX *ctx;
 	PKCS11_TOKEN *match_tok = NULL;
 	PKCS11_KEY *key = NULL;
 	EVP_PKEY *pkey = NULL;
@@ -466,6 +471,10 @@ int load_pkcs11_key(struct openconnect_info *vpninfo)
 	PKCS11_SLOT *slot_list = NULL, *slot, *login_slot = NULL;
 	unsigned int slot_count, matching_slots = 0;
 	int ret = 0;
+
+	ctx = pkcs11_ctx(vpninfo);
+	if (!ctx)
+		return -EIO;
 
 	if (parse_pkcs11_uri(vpninfo->sslkey, &match_tok, &key_id,
 			     &key_id_len, &key_label) < 0) {

@@ -116,6 +116,7 @@
 #define SHA1_SIZE 20
 #define MD5_SIZE 16
 
+#define MAX(x,y) ((x)>(y))?(x):(y)
 /****************************************************************************/
 
 struct pkt {
@@ -151,9 +152,9 @@ struct pkt {
 #define KA_KEEPALIVE	3
 #define KA_REKEY	4
 
-#define DTLS_NOSECRET	0
-#define DTLS_SECRET	1
-#define DTLS_DISABLED	2
+#define DTLS_NOSECRET	0	/* Random secret has not been generated yet */
+#define DTLS_SECRET	1	/* Secret is present, ready to attempt DTLS */
+#define DTLS_DISABLED	2	/* DTLS was disabled on the *client* side */
 #define DTLS_SLEEPING	3	/* For ESP, sometimes sending probes */
 #define DTLS_CONNECTING	4	/* ESP probe received; must tell server */
 #define DTLS_CONNECTED	5	/* Server informed and should be sending ESP */
@@ -245,6 +246,7 @@ struct http_auth_state {
 };
 
 struct vpn_proto {
+	const char *name;
 	int (*vpn_close_session)(struct openconnect_info *vpninfo, const char *reason);
 
 	/* This does the full authentication, calling back as appropriate */
@@ -316,8 +318,8 @@ struct esp {
 	gnutls_cipher_hd_t cipher;
 	gnutls_hmac_hd_t hmac;
 #elif defined(ESP_OPENSSL)
-	HMAC_CTX hmac;
-	EVP_CIPHER_CTX cipher;
+	HMAC_CTX *hmac, *pkt_hmac;
+	EVP_CIPHER_CTX *cipher;
 #endif
 	uint32_t seq;
 	uint32_t seq_backlog;
@@ -326,7 +328,7 @@ struct esp {
 };
 
 struct openconnect_info {
-	struct vpn_proto proto;
+	const struct vpn_proto *proto;
 
 #ifdef HAVE_ICONV
 	iconv_t ic_legacy_to_utf8;
@@ -443,6 +445,8 @@ struct openconnect_info {
 
 	void *peer_cert;
 	char *peer_cert_hash;
+	void *cert_list_handle;
+	int cert_list_size;
 
 	char *cookie; /* Pointer to within cookies list */
 	struct oc_vpn_option *cookies;
@@ -541,7 +545,6 @@ struct openconnect_info {
 	uid_t uid;
 	gid_t gid;
 #endif
-	int tun_is_up; /* whether the tun device is setup */
 	int use_tun_script;
 	int script_tun;
 	char *ifname;
@@ -611,6 +614,8 @@ struct openconnect_info {
 	openconnect_progress_vfn progress;
 	openconnect_protect_socket_vfn protect_socket;
 	openconnect_getaddrinfo_vfn getaddrinfo_override;
+	openconnect_setup_tun_vfn setup_tun;
+	openconnect_reconnected_vfn reconnected;
 
 	int (*ssl_read)(struct openconnect_info *vpninfo, char *buf, size_t len);
 	int (*ssl_gets)(struct openconnect_info *vpninfo, char *buf, size_t len);
@@ -713,6 +718,14 @@ static inline int set_fd_cloexec(int fd)
 	return 0; /* Windows has O_INHERIT but... */
 #else
 	return fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
+#endif
+}
+static inline int tun_is_up(struct openconnect_info *vpninfo)
+{
+#ifdef _WIN32
+	return vpninfo->tun_fh != NULL;
+#else
+	return vpninfo->tun_fd != -1;
 #endif
 }
 

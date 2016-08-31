@@ -1001,8 +1001,16 @@ static int load_certificate(struct openconnect_info *vpninfo)
 
 	key_is_p11 = !strncmp(vpninfo->sslkey, "pkcs11:", 7);
 	cert_is_p11 = !strncmp(vpninfo->cert, "pkcs11:", 7);
+
+#ifdef HAVE_GNUTLS_URL_IS_SUPPORTED
+	/* GnuTLS returns true for pkcs11:, tpmkey:, system:, and custom URLs. */
+	key_is_sys = !key_is_p11 && gnutls_url_is_supported(vpninfo->sslkey);
+	cert_is_sys = !cert_is_p11 && gnutls_url_is_supported(vpninfo->cert);
+#else
+	/* Fallback for GnuTLS < 3.1.0. */
 	key_is_sys = !strncmp(vpninfo->sslkey, "system:", 7);
 	cert_is_sys = !strncmp(vpninfo->cert, "system:", 7);
+#endif
 
 #ifndef HAVE_GNUTLS_SYSTEM_KEYS
 	if (key_is_sys || cert_is_sys) {
@@ -1948,6 +1956,38 @@ void openconnect_free_cert_info(struct openconnect_info *vpninfo,
 	gnutls_free(buf);
 }
 
+int openconnect_get_peer_cert_chain(struct openconnect_info *vpninfo,
+				    struct oc_cert **chainp)
+{
+	struct oc_cert *chain, *p;
+	const gnutls_datum_t *cert_list = vpninfo->cert_list_handle;
+	int i, cert_list_size = vpninfo->cert_list_size;
+
+	if (!cert_list)
+		return -EINVAL;
+
+	if (cert_list_size <= 0)
+		return -EIO;
+
+	p = chain = calloc(cert_list_size, sizeof(struct oc_cert));
+	if (!chain)
+		return -ENOMEM;
+
+	for (i = 0; i < cert_list_size; i++, p++) {
+		p->der_data = (unsigned char *)cert_list[i].data;
+		p->der_len = cert_list[i].size;
+	}
+
+	*chainp = chain;
+	return cert_list_size;
+}
+
+void openconnect_free_peer_cert_chain(struct openconnect_info *vpninfo,
+				      struct oc_cert *chain)
+{
+	free(chain);
+}
+
 static int verify_peer(gnutls_session_t session)
 {
 	struct openconnect_info *vpninfo = gnutls_session_get_ptr(session);
@@ -2079,10 +2119,13 @@ static int verify_peer(gnutls_session_t session)
 		vpn_progress(vpninfo, PRG_INFO,
 			     _("Server certificate verify failed: %s\n"),
 			     reason);
-		if (vpninfo->validate_peer_cert)
+		if (vpninfo->validate_peer_cert) {
+			vpninfo->cert_list_handle = (void *)cert_list;
+			vpninfo->cert_list_size = cert_list_size;
 			err = vpninfo->validate_peer_cert(vpninfo->cbdata,
 							  reason) ? GNUTLS_E_CERTIFICATE_ERROR : 0;
-		else
+			vpninfo->cert_list_handle = NULL;
+		} else
 			err = GNUTLS_E_CERTIFICATE_ERROR;
 	}
 

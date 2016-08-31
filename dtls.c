@@ -25,6 +25,10 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef _WIN32
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
 
 /* We do this in order to get IPV6_PATHMTU on OSX */
 #ifdef __APPLE__
@@ -1077,11 +1081,6 @@ int dtls_mainloop(struct openconnect_info *vpninfo, int *timeout)
 
 #if defined(DTLS_GNUTLS)
 
-/* Old glibc doesn't define that */
-#if defined(__linux__) && !defined(IPV6_PATHMTU)
-# define IPV6_PATHMTU 61
-#endif
-
 static int is_cancelled(struct openconnect_info *vpninfo)
 {
 	fd_set rd_set;
@@ -1178,7 +1177,7 @@ static int detect_mtu_ipv4(struct openconnect_info *vpninfo, unsigned char *buf)
 				goto fail;
 		} while(ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED);
 
-		if (ret > 0 && (buf[0] != AC_PKT_DPD_RESP || memcmp(&buf[1], id, sizeof(buf) != 0))) {
+		if (ret > 0 && (buf[0] != AC_PKT_DPD_RESP || memcmp(&buf[1], id, sizeof(id)) != 0)) {
 			vpn_progress(vpninfo, PRG_DEBUG,
 			     _("Received unexpected packet (%.2x) in MTU detection; skipping.\n"), (unsigned)buf[0]);
 			goto reread; /* resend */
@@ -1203,6 +1202,13 @@ static int detect_mtu_ipv4(struct openconnect_info *vpninfo, unsigned char *buf)
 }
 
 #if defined(IPPROTO_IPV6)
+
+/* This symbol is missing in glibc < 2.22 (bug 18643). */
+#if defined(__linux__) && !defined(HAVE_IPV6_PATHMTU)
+# define HAVE_IPV6_PATHMTU 1
+# define IPV6_PATHMTU 61
+#endif
+
 /* Verifies whether current MTU is ok, or detects new MTU using IPv6's ICMP6 messages
  * @buf: is preallocated with MTU size
  * @id: a unique ID for our DPD exchange
@@ -1263,7 +1269,7 @@ static int detect_mtu_ipv6(struct openconnect_info *vpninfo, unsigned char *buf)
 			continue;
 
 		/* something unexpected was received, let's ignore it */
-		if (ret > 0 && (buf[0] != AC_PKT_DPD_RESP || memcmp(&buf[1], id, sizeof(buf) != 0))) {
+		if (ret > 0 && (buf[0] != AC_PKT_DPD_RESP || memcmp(&buf[1], id, sizeof(id)) != 0)) {
 			vpn_progress(vpninfo, PRG_DEBUG,
 			     _("Received unexpected packet (%.2x) in MTU detection; skipping.\n"), (unsigned)buf[0]);
 			goto reread;
@@ -1273,7 +1279,7 @@ static int detect_mtu_ipv6(struct openconnect_info *vpninfo, unsigned char *buf)
 		break;
 	} while(max_resends-- > 0);
 
-#ifndef _WIN32
+#ifdef HAVE_IPV6_PATHMTU
 	/* If we received back our DPD packet, do nothing; otherwise,
 	 * attempt to get MTU from the ICMP6 packet we received */
 	if (ret <= 0) {
