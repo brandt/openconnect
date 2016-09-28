@@ -128,12 +128,12 @@ static void __attribute__ ((format(printf, 3, 4)))
 	}
 }
 #define openlog(...)  /* */
-#elif defined(_WIN32)
+#elif defined(_WIN32) || defined(__native_client__)
 /*
  * FIXME: Perhaps we could implement syslog_progress() using these APIs:
  * http://msdn.microsoft.com/en-us/library/windows/desktop/aa364148%28v=vs.85%29.aspx
  */
-#else /* !__ANDROID__ && !_WIN32 */
+#else /* !__ANDROID__ && !_WIN32 && !__native_client__ */
 #include <syslog.h>
 static void  __attribute__ ((format(printf, 3, 4)))
     syslog_progress(void *_vpninfo, int level, const char *fmt, ...)
@@ -191,6 +191,8 @@ enum {
 	OPT_PFS,
 	OPT_PROXY_AUTH,
 	OPT_HTTP_AUTH,
+	OPT_LOCAL_HOSTNAME,
+	OPT_PROTOCOL,
 };
 
 
@@ -256,6 +258,7 @@ static const struct option long_options[] = {
 	OPTION("resolve", 1, OPT_RESOLVE),
 	OPTION("key-password-from-fsid", 0, OPT_KEY_PASSWORD_FROM_FSID),
 	OPTION("useragent", 1, OPT_USERAGENT),
+	OPTION("local-hostname", 1, OPT_LOCAL_HOSTNAME),
 	OPTION("disable-ipv6", 0, OPT_DISABLE_IPV6),
 	OPTION("no-proxy", 0, OPT_NO_PROXY),
 	OPTION("libproxy", 0, OPT_LIBPROXY),
@@ -270,6 +273,7 @@ static const struct option long_options[] = {
 	OPTION("no-xmlpost", 0, OPT_NO_XMLPOST),
 	OPTION("dump-http-traffic", 0, OPT_DUMP_HTTP),
 	OPTION("no-system-trust", 0, OPT_NO_SYSTEM_TRUST),
+	OPTION("protocol", 1, OPT_PROTOCOL),
 #ifdef OPENCONNECT_GNUTLS
 	OPTION("gnutls-debug", 1, OPT_GNUTLS_DEBUG),
 #endif
@@ -818,6 +822,7 @@ static void usage(void)
 	printf("      --reconnect-timeout         %s\n", _("Connection retry timeout in seconds"));
 	printf("      --servercert=FINGERPRINT    %s\n", _("Server's certificate SHA1 fingerprint"));
 	printf("      --useragent=STRING          %s\n", _("HTTP header User-Agent: field"));
+	printf("      --local-hostname=STRING     %s\n", _("Local hostname to advertise to server"));
 	printf("      --resolve=HOST:IP           %s\n", _("Use IP when connecting to HOST"));
 	printf("      --os=STRING                 %s\n", _("OS type (linux,linux-64,win,...) to report"));
 	printf("      --dtls-local-port=PORT      %s\n", _("Set local port for DTLS datagrams"));
@@ -1071,9 +1076,9 @@ int main(int argc, char **argv)
 	vpninfo->use_tun_script = 0;
 	vpninfo->uid = getuid();
 	vpninfo->gid = getgid();
+
 	if (!uname(&utsbuf)) {
-		free(vpninfo->localname);
-		vpninfo->localname = xstrdup(utsbuf.nodename);
+		openconnect_set_localname(vpninfo, utsbuf.nodename);
 	}
 #endif
 
@@ -1104,6 +1109,10 @@ int main(int argc, char **argv)
 			vpninfo->csd_wrapper = keep_config_arg();
 			break;
 #endif /* !_WIN32 */
+		case OPT_PROTOCOL:
+			if (openconnect_set_protocol(vpninfo, config_arg))
+				exit(1);
+			break;
 		case OPT_JUNIPER:
 			fprintf(stderr, "WARNING: Juniper Network Connect support is experimental.\n");
 			fprintf(stderr, "It will probably be superseded by Junos Pulse support.\n");
@@ -1328,6 +1337,9 @@ int main(int argc, char **argv)
 			free(vpninfo->useragent);
 			vpninfo->useragent = dup_config_arg();
 			break;
+		case OPT_LOCAL_HOSTNAME:
+			openconnect_set_localname(vpninfo, config_arg);
+			break;
 		case OPT_FORCE_DPD:
 			openconnect_set_dpd(vpninfo, atoi(config_arg));
 			break;
@@ -1414,12 +1426,14 @@ int main(int argc, char **argv)
 	if (proxy && openconnect_set_http_proxy(vpninfo, strdup(proxy)))
 		exit(1);
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__native_client__)
 	if (use_syslog) {
 		openlog("openconnect", LOG_PID, LOG_DAEMON);
 		vpninfo->progress = syslog_progress;
 	}
+#endif /* !_WIN32 && !__native_client__ */
 
+#ifndef _WIN32
 	memset(&sa, 0, sizeof(sa));
 
 	sa.sa_handler = handle_signal;

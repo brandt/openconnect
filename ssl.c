@@ -347,12 +347,17 @@ int connect_https_socket(struct openconnect_info *vpninfo)
 			if (!err) {
 				/* Store the peer address we actually used, so that DTLS can
 				   use it again later */
-				if (host[0])
+				free(vpninfo->ip_info.gateway_addr);
+				vpninfo->ip_info.gateway_addr = NULL;
+
+				if (host[0]) {
+					vpninfo->ip_info.gateway_addr = strdup(host);
 					vpn_progress(vpninfo, PRG_INFO, _("Connected to %s%s%s:%s\n"),
 						     rp->ai_family == AF_INET6 ? "[" : "",
 						     host,
 						     rp->ai_family == AF_INET6 ? "]" : "",
 						     port);
+				}
 
 				free(vpninfo->peer_addr);
 				vpninfo->peer_addrlen = 0;
@@ -423,6 +428,8 @@ int connect_https_socket(struct openconnect_info *vpninfo)
 				free(vpninfo->peer_addr);
 				vpninfo->peer_addr = 0;
 				vpninfo->peer_addrlen = 0;
+				free(vpninfo->ip_info.gateway_addr);
+				vpninfo->ip_info.gateway_addr = NULL;
 			}
 		}
 		freeaddrinfo(result);
@@ -575,7 +582,7 @@ int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo)
 
 	return 0;
 }
-#else
+#elif defined(HAVE_STATFS)
 int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo)
 {
 	char *sslkey = openconnect_utf8_to_legacy(vpninfo, vpninfo->sslkey);
@@ -600,6 +607,11 @@ int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo)
 		free(sslkey);
 
 	return err;
+}
+#else
+int openconnect_passphrase_from_fsid(struct openconnect_info *vpninfo)
+{
+	return -EOPNOTSUPP;
 }
 #endif
 
@@ -794,7 +806,7 @@ void check_cmd_fd(struct openconnect_info *vpninfo, fd_set *fds)
 int is_cancel_pending(struct openconnect_info *vpninfo, fd_set *fds)
 {
 	check_cmd_fd(vpninfo, fds);
-	return vpninfo->got_cancel_cmd;
+	return vpninfo->got_cancel_cmd || vpninfo->got_pause_cmd;
 }
 
 void poll_cmd_fd(struct openconnect_info *vpninfo, int timeout)
@@ -991,7 +1003,7 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 	free(vpninfo->tun_pkt);
 	vpninfo->tun_pkt = NULL;
 
-	while ((ret = vpninfo->proto.tcp_connect(vpninfo))) {
+	while ((ret = vpninfo->proto->tcp_connect(vpninfo))) {
 		if (timeout <= 0)
 			return ret;
 		if (ret == -EPERM) {
@@ -1012,6 +1024,10 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 		if (interval > RECONNECT_INTERVAL_MAX)
 			interval = RECONNECT_INTERVAL_MAX;
 	}
+
 	script_config_tun(vpninfo, "reconnect");
+	if (vpninfo->reconnected)
+		vpninfo->reconnected(vpninfo->cbdata);
+
 	return 0;
 }

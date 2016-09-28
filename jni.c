@@ -294,6 +294,36 @@ out:
 	(*ctx->jenv)->PopLocalFrame(ctx->jenv, NULL);
 }
 
+static void setup_tun_cb(void *privdata)
+{
+	struct libctx *ctx = privdata;
+	jmethodID mid;
+
+	if ((*ctx->jenv)->PushLocalFrame(ctx->jenv, 256) < 0)
+		return;
+
+	mid = get_obj_mid(ctx, ctx->jobj, "onSetupTun", "()V");
+	if (mid)
+		(*ctx->jenv)->CallVoidMethod(ctx->jenv, ctx->jobj, mid);
+
+	(*ctx->jenv)->PopLocalFrame(ctx->jenv, NULL);
+}
+
+static void reconnected_cb(void *privdata)
+{
+	struct libctx *ctx = privdata;
+	jmethodID mid;
+
+	if ((*ctx->jenv)->PushLocalFrame(ctx->jenv, 256) < 0)
+		return;
+
+	mid = get_obj_mid(ctx, ctx->jobj, "onReconnected", "()V");
+	if (mid)
+		(*ctx->jenv)->CallVoidMethod(ctx->jenv, ctx->jobj, mid);
+
+	(*ctx->jenv)->PopLocalFrame(ctx->jenv, NULL);
+}
+
 static jobject new_auth_form(struct libctx *ctx, struct oc_auth_form *form)
 {
 	jmethodID mid;
@@ -609,6 +639,8 @@ JNIEXPORT jlong JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_init(
 					unlock_token_cb);
 	openconnect_set_protect_socket_handler(ctx->vpninfo, protect_socket_cb);
 	openconnect_set_stats_handler(ctx->vpninfo, stats_cb);
+	openconnect_set_setup_tun_handler(ctx->vpninfo, setup_tun_cb);
+	openconnect_set_reconnected_handler(ctx->vpninfo, reconnected_cb);
 
 	ctx->cmd_fd = openconnect_setup_cmd_pipe(ctx->vpninfo);
 	if (ctx->cmd_fd < 0)
@@ -751,6 +783,55 @@ JNIEXPORT jbyteArray JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_ge
 
 	openconnect_free_cert_info(ctx->vpninfo, buf);
 	return jresult;
+}
+
+/* special handling: callee-allocated, caller-freed binary buffer */
+JNIEXPORT jbyteArray JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_getPeerCertChain(
+	JNIEnv *jenv, jobject jobj)
+{
+	struct libctx *ctx = getctx(jenv, jobj);
+	struct oc_cert *chain = NULL, *p;
+	int cert_list_size, i;
+	jobjectArray jresult = NULL;
+	jclass jcls;
+
+	if (!ctx)
+		goto err;
+	cert_list_size = openconnect_get_peer_cert_chain(ctx->vpninfo, &chain);
+	if (cert_list_size <= 0)
+		goto err;
+
+	jcls = (*ctx->jenv)->FindClass(ctx->jenv, "[B");
+	if (!jcls)
+		goto err;
+
+	jresult = (*ctx->jenv)->NewObjectArray(ctx->jenv, cert_list_size, jcls, NULL);
+	if (!jresult)
+		goto err;
+
+	if ((*ctx->jenv)->PushLocalFrame(ctx->jenv, 256) < 0)
+		goto err;
+
+	for (i = 0, p = chain; i < cert_list_size; i++, p++) {
+		jbyteArray cert = (*ctx->jenv)->NewByteArray(ctx->jenv, p->der_len);
+		if (!cert)
+			goto err2;
+		(*ctx->jenv)->SetByteArrayRegion(ctx->jenv, cert, 0, p->der_len, (jbyte *)p->der_data);
+		(*ctx->jenv)->SetObjectArrayElement(ctx->jenv, jresult, i, cert);
+	}
+
+	(*ctx->jenv)->PopLocalFrame(ctx->jenv, NULL);
+	openconnect_free_peer_cert_chain(ctx->vpninfo, chain);
+	return jresult;
+
+err2:
+	(*ctx->jenv)->PopLocalFrame(ctx->jenv, NULL);
+err:
+	if (jresult)
+		(*ctx->jenv)->DeleteLocalRef(ctx->jenv, jresult);
+	if (chain)
+		openconnect_free_peer_cert_chain(ctx->vpninfo, chain);
+	return NULL;
 }
 
 /* special handling: two string arguments */
@@ -1052,6 +1133,14 @@ JNIEXPORT jstring JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_getHo
 	RETURN_STRING_END
 }
 
+JNIEXPORT jstring JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_getDNSName(
+	JNIEnv *jenv, jobject jobj)
+{
+	RETURN_STRING_START
+	buf = openconnect_get_dnsname(ctx->vpninfo);
+	RETURN_STRING_END
+}
+
 JNIEXPORT jstring JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_getUrlpath(
 	JNIEnv *jenv, jobject jobj)
 {
@@ -1182,6 +1271,14 @@ JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setUrlpa
 	SET_STRING_END();
 }
 
+JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setLocalName(
+	JNIEnv *jenv, jobject jobj, jstring jarg)
+{
+	SET_STRING_START()
+	openconnect_set_localname(ctx->vpninfo, arg);
+	SET_STRING_END();
+}
+
 JNIEXPORT void JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_setCAFile(
 	JNIEnv *jenv, jobject jobj, jstring jarg)
 {
@@ -1254,6 +1351,7 @@ JNIEXPORT jobject JNICALL Java_org_infradead_libopenconnect_LibOpenConnect_getIP
 	    set_string(ctx, jobj, "netmask6", ip->netmask6) ||
 	    set_string(ctx, jobj, "domain", ip->domain) ||
 	    set_string(ctx, jobj, "proxyPac", ip->proxy_pac) ||
+	    set_string(ctx, jobj, "gatewayAddr", ip->gateway_addr) ||
 	    set_int(ctx, jobj, "MTU", ip->mtu))
 		return NULL;
 

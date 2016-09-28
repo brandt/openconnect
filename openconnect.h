@@ -24,6 +24,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #ifdef _WIN32
 #define uid_t unsigned
 #endif
@@ -32,11 +36,18 @@
 #define OPENCONNECT_API_VERSION_MINOR 3
 
 /*
- * API version 5.3:
+ * API version 5.3 (v7.07; 2016-07-11):
+ *  - Add openconnect_set_localname().
  *  - Add openconnect_override_getaddrinfo().
  *  - Add openconnect_get_cstp_compression().
  *  - Add openconnect_get_dtls_compression().
  *  - Add openconnect_disable_ipv6().
+ *  - Add ip_info->gateway_addr.
+ *  - Add openconnect_set_setup_tun_handler().
+ *  - Add openconnect_set_reconnected_handler().
+ *  - Add openconnect_get_dnsname().
+ *  - Add openconnect_get_peer_cert_chain() and
+ *        openconnect_free_peer_cert_chain().
  *
  * API version 5.2 (v7.05; 2015-03-10):
  *  - Add openconnect_set_http_auth(), openconnect_set_protocol().
@@ -244,6 +255,11 @@ struct oc_ip_info {
 	struct oc_split_include *split_dns;
 	struct oc_split_include *split_includes;
 	struct oc_split_include *split_excludes;
+
+	/* The elements above this line come from server-provided CSTP headers,
+	 * so they should be handled with caution.  gateway_addr is generated
+	 * locally from getnameinfo(). */
+	char *gateway_addr;
 };
 
 struct oc_vpn_option {
@@ -257,6 +273,12 @@ struct oc_stats {
 	uint64_t tx_bytes;
 	uint64_t rx_pkts;
 	uint64_t rx_bytes;
+};
+
+struct oc_cert {
+	int der_len;
+	unsigned char *der_data;
+	void *reserved;
 };
 
 /****************************************************************************/
@@ -353,6 +375,16 @@ int openconnect_get_peer_cert_DER(struct openconnect_info *vpninfo,
 				  unsigned char **buf);
 void openconnect_free_cert_info(struct openconnect_info *vpninfo,
 				void *buf);
+
+/* Creates a list of all certs in the peer's chain, returning the
+   number of certs in the chain (or <0 on error). Only valid inside the
+   validate_peer_cert callback. The caller should free the chain,
+   but should not modify the contents. */
+int openconnect_get_peer_cert_chain(struct openconnect_info *vpninfo,
+				    struct oc_cert **chain);
+void openconnect_free_peer_cert_chain(struct openconnect_info *vpninfo,
+				      struct oc_cert *chain);
+
 /* Contains a comma-separated list of authentication methods to enabled.
    Currently supported: Negotiate,NTLM,Digest,Basic */
 int openconnect_set_http_auth(struct openconnect_info *vpninfo,
@@ -378,10 +410,24 @@ const char *openconnect_get_dtls_cipher(struct openconnect_info *);
 const char *openconnect_get_cstp_compression(struct openconnect_info *);
 const char *openconnect_get_dtls_compression(struct openconnect_info *);
 
+/* Returns the IP address of the exact host to which the connection
+ * was made. In --cookieonly mode or in any other scenario involving
+ * a "two stage" connection, it is important to reconnect by IP because
+ * the server side may be using DNS trickery for load balancing.
+ *
+ * If the IP address is unavailable due to the use of a proxy, this will
+ * fall back to returning the DNS name. */
 const char *openconnect_get_hostname(struct openconnect_info *);
+
+/* Returns the hostname parsed out of the server name URL. This is
+ * intended to be used by the validate_peer_cert callback to check that
+ * the certificate matches the server name. */
+const char *openconnect_get_dnsname(struct openconnect_info *);
+
 int openconnect_set_hostname(struct openconnect_info *, const char *);
 char *openconnect_get_urlpath(struct openconnect_info *);
 int openconnect_set_urlpath(struct openconnect_info *, const char *);
+int openconnect_set_localname(struct openconnect_info *, const char *);
 
 /* Some software tokens, such as HOTP tokens, include a counter which
  * needs to be stored in persistent storage.
@@ -593,8 +639,22 @@ int openconnect_has_system_key_support(void);
 int openconnect_set_protocol(struct openconnect_info *vpninfo, const char *protocol);
 
 struct addrinfo;
-typedef int (*openconnect_getaddrinfo_vfn) (void *privdata, const char *nost, const char *service,
+typedef int (*openconnect_getaddrinfo_vfn) (void *privdata, const char *node, const char *service,
 					    const struct addrinfo *hints, struct addrinfo **res);
 void openconnect_override_getaddrinfo(struct openconnect_info *vpninfo, openconnect_getaddrinfo_vfn gai_fn);
+
+/* Callback for configuring the interface after MTU detection finishes. */
+typedef void (*openconnect_setup_tun_vfn) (void *privdata);
+void openconnect_set_setup_tun_handler(struct openconnect_info *vpninfo,
+				       openconnect_setup_tun_vfn setup_tun);
+
+/* Callback for indicating that a TCP reconnection succeeded. */
+typedef void (*openconnect_reconnected_vfn) (void *privdata);
+void openconnect_set_reconnected_handler(struct openconnect_info *vpninfo,
+				         openconnect_reconnected_vfn reconnected_fn);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __OPENCONNECT_H__ */

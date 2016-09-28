@@ -49,6 +49,8 @@ public final class LibTest {
 
 			byte der[] = getPeerCertDER();
 			System.out.println("DER is " + der.length + " bytes long");
+			byte chain[][] = getPeerCertChain();
+			System.out.println("Chain has " + chain.length + " certs");
 
 			System.out.print("\nAccept this certificate? [n] ");
 			String s = getline();
@@ -163,6 +165,14 @@ public final class LibTest {
 				break;
 			}
 		}
+
+		@Override
+		public void onSetupTun() {
+			System.out.println("SETUP_TUN");
+			if (setupTunDevice("/etc/vpnc/vpnc-script", null) != 0 &&
+				setupTunScript("ocproxy") != 0)
+				die("Error setting up tunnel");
+		}
 	}
 
 	private static void printList(String pfx, List<String> ss) {
@@ -184,6 +194,7 @@ public final class LibTest {
 		System.out.println("+-IPv6: " + ip.addr6 + " / " + ip.netmask6);
 		System.out.println("+-Domain: " + ip.domain);
 		System.out.println("+-proxy.pac: " + ip.proxyPac);
+		System.out.println("+-Gateway IP: " + ip.gatewayAddr);
 		System.out.println("+-MTU: " + ip.MTU);
 		printList("+-DNS", ip.DNS);
 		printList("+-NBNS", ip.NBNS);
@@ -231,10 +242,6 @@ public final class LibTest {
 			die("Error establishing VPN link");
 
 		printIPInfo(lib.getIPInfo());
-
-		if (lib.setupTunDevice("/etc/vpnc/vpnc-script", null) != 0 &&
-		    lib.setupTunScript("ocproxy") != 0)
-			die("Error setting up tunnel");
 
 		if (lib.setupDTLS(60) != 0)
 			die("Error setting up DTLS");
