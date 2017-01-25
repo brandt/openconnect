@@ -26,6 +26,7 @@ symver_getline=
 symver_asprintf=
 symver_vasprintf=
 symver_win32_strerror=
+enable_apple_keychain=
 
 case $host_os in
  *linux* | *gnu* | *nacl*)
@@ -60,6 +61,12 @@ case $host_os in
     ;;
  *darwin*)
     LIBPCSCLITE_LIBS="-Wl,-framework -Wl,PCSC"
+    AC_CHECK_HEADERS(Security/Security.h, [
+            enable_apple_keychain=yes
+            KEYCHAIN_LDFLAGS="-framework Security -framework CoreFoundation"
+            AC_SUBST(KEYCHAIN_LDFLAGS)
+            ],
+            AC_MSG_WARN([Security framework not found. Disabling Mac OS X Keychain support.]))
     LIBPCSCLITE_CFLAGS=" "
     ;;
  *)
@@ -70,6 +77,11 @@ case $host_os in
     ;;
 esac
 AM_CONDITIONAL(OPENCONNECT_WIN32,  [ test "$have_win" = "yes" ])
+AM_CONDITIONAL(OPENCONNECT_KEYCHAIN,  [ test "$enable_apple_keychain" = "yes" ])
+
+if test "$enable_apple_keychain" = "yes"; then
+    AC_MSG_WARN([Enabled Apple Keychain support])
+fi
 
 AC_ARG_WITH([vpnc-script],
 	[AS_HELP_STRING([--with-vpnc-script],

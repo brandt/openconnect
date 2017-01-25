@@ -240,6 +240,7 @@ static void free_optlist(struct oc_vpn_option *opt)
 	}
 }
 
+// TODO: Zero out passwords before freeing
 void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 {
 	openconnect_close_https(vpninfo, 1);
@@ -990,6 +991,7 @@ int openconnect_set_compression_mode(struct openconnect_info *vpninfo,
 	}
 }
 
+// TODO: Zero out passwords before freeing
 void nuke_opt_values(struct oc_form_opt *opt)
 {
 	for (; opt; opt = opt->next) {
