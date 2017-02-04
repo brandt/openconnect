@@ -38,13 +38,14 @@ lib_srcs_yubikey = yubikey.c
 lib_srcs_stoken = stoken.c
 lib_srcs_esp = esp.c esp-seqno.c
 lib_srcs_dtls = dtls.c
+lib_srcs_keychain = keychain.c
 
 POTFILES = $(openconnect_SOURCES) $(lib_srcs_cisco) $(lib_srcs_juniper) \
 	   gnutls-esp.c gnutls-dtls.c openssl-esp.c openssl-dtls.c \
 	   $(lib_srcs_esp) $(lib_srcs_dtls) \
 	   $(lib_srcs_openssl) $(lib_srcs_gnutls) $(library_srcs) \
 	   $(lib_srcs_win32) $(lib_srcs_posix) $(lib_srcs_gssapi) $(lib_srcs_iconv) \
-	   $(lib_srcs_oath) $(lib_srcs_yubikey) $(lib_srcs_stoken) openconnect-internal.h
+	   $(lib_srcs_oath) $(lib_srcs_yubikey) $(lib_srcs_stoken) $(lib_srcs_keychain) openconnect-internal.h
 
 library_srcs += $(lib_srcs_juniper) $(lib_srcs_cisco) $(lib_srcs_oath)
 if OPENCONNECT_LIBPCSCLITE
@@ -80,6 +81,9 @@ library_srcs += $(lib_srcs_win32)
 else
 library_srcs += $(lib_srcs_posix)
 endif
+if OPENCONNECT_KEYCHAIN
+library_srcs += $(lib_srcs_keychain)
+endif
 
 libopenconnect_la_SOURCES = version.c $(library_srcs)
 libopenconnect_la_CFLAGS = $(AM_CFLAGS) $(SSL_CFLAGS) $(DTLS_SSL_CFLAGS) $(LIBXML2_CFLAGS) $(LIBPROXY_CFLAGS) $(ZLIB_CFLAGS) $(P11KIT_CFLAGS) $(TSS_CFLAGS) $(LIBSTOKEN_CFLAGS) $(LIBPSKC_CFLAGS) $(GSSAPI_CFLAGS) $(INTL_CFLAGS) $(ICONV_CFLAGS) $(LIBPCSCLITE_CFLAGS) $(LIBP11_CFLAGS) $(LIBLZ4_CFLAGS)
@@ -92,12 +96,19 @@ LT_VER_ARG = -version-info
 else
 LT_VER_ARG = -version-number
 endif
+
 libopenconnect_la_LDFLAGS = $(LT_VER_ARG) @APIMAJOR@:@APIMINOR@ -no-undefined
-noinst_HEADERS = openconnect-internal.h openconnect.h gnutls.h lzo.h
+noinst_HEADERS = openconnect-internal.h openconnect.h gnutls.h lzo.h keychain.h
 include_HEADERS = openconnect.h
+
 if HAVE_VSCRIPT
 libopenconnect_la_LDFLAGS += @VSCRIPT_LDFLAGS@,libopenconnect.map
 libopenconnect_la_DEPENDENCIES = libopenconnect.map
+endif
+
+if OPENCONNECT_KEYCHAIN
+libopenconnect_la_LIBADD += $(KEYCHAIN_LIBS)
+libopenconnect_la_LDFLAGS += $(KEYCHAIN_LDFLAGS)
 endif
 
 if OPENCONNECT_JNI

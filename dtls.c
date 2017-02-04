@@ -30,6 +30,14 @@
 #include <sys/socket.h>
 #endif
 
+/* We do this in order to get IPV6_PATHMTU on OSX */
+#ifdef __APPLE__
+#ifndef __APPLE_USE_RFC_3542
+#define __APPLE_USE_RFC_3542
+#endif
+#include <netinet/in.h>
+#endif
+
 #include "openconnect-internal.h"
 
 /*

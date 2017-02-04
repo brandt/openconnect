@@ -62,6 +62,10 @@
 static const char *legacy_charset;
 #endif
 
+#ifdef __APPLE__
+#include "keychain.h"
+#endif
+
 static int write_new_config(void *_vpninfo,
 			    const char *buf, int buflen);
 static void __attribute__ ((format(printf, 3, 4)))
@@ -90,6 +94,7 @@ static char *token_filename;
 static char *server_cert = NULL;
 
 static char *username;
+static char *keychain;
 static char *password;
 static char *authgroup;
 static int authgroup_set;
@@ -189,6 +194,7 @@ enum {
 	OPT_PROTOCOL,
 	OPT_PASSTOS,
 };
+
 
 #ifdef __sun__
 /*
@@ -1923,29 +1929,65 @@ static int process_auth_form_cb(void *_vpninfo,
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_TEXT) {
-			if (username &&
-			    !strcmp(opt->name, "username")) {
-				opt->_value = username;
+			if (username && !strcmp(opt->name, "username")) {
+				opt->_value = username;  // fill-in the form
 				username = NULL;
 			} else {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
+				username = prompt_for_input(opt->label, vpninfo, 0);
+				opt->_value = username;
 			}
 
-			if (!opt->_value)
+			if (!opt->_value) {
 				goto err;
+			} else {
+				// we want to reset the keychain name any time username was provided
+				keychain = build_keychain_name(opt->_value, vpninfo->hostname);
+			}
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_PASSWORD) {
-			if (password &&
-			    !strcmp(opt->name, "password")) {
-				opt->_value = password;
-				password = NULL;
+			// printf("Entering password section...\n");
+			if (!strcmp(opt->name, "password")) {
+				if (password) {  // We already know the password
+					opt->_value = password;
+					password = NULL;
+				} else if (keychain) {
+					unsigned int pass_len = 0;
+					char *kc_err;
+					int kc_status = 0;
+					int kc_add_status = 0;
+					kc_status = keychain_find(&kc_err, "openconnect", keychain, &pass_len, &password);
+
+					if (kc_status == 0) {
+						opt->_value = password;  // success
+					} else if (kc_status == -1) {
+						printf("No password in keychain for %s. We'll add it now...\n", keychain);
+						password = prompt_for_input(opt->label, vpninfo, 1);
+						kc_add_status = keychain_add(&kc_err, "openconnect", keychain, password);
+						if (kc_add_status != 0) {
+							fprintf(stderr, _("Error adding item to keychain: %s\n"), kc_err);
+							exit(1);
+						}
+					} else {  // keychain_find() returned kc_status <= -2
+						fprintf(stderr, _("Error fetching keychain item: %s\n"), kc_err);
+						password = prompt_for_input(opt->label, vpninfo, 1);
+					}
+
+					opt->_value = password;
+					password = NULL;
+				} else {
+					// For some reason we don't know the user@fqdn keychain name anymore
+					fprintf(stderr, _("Error determining keychain name.\n"));
+					opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+				}
 			} else {
+				// This isn't the "password" field; probably "password#2"
 				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
 			}
 
-			if (!opt->_value)
+			if (!opt->_value) {
 				goto err;
+			}
 			empty = 0;
 		} else if (opt->type == OC_FORM_OPT_TOKEN) {
 			/* Nothing to do here, but if the tokencode is being
