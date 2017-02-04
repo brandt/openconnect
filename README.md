@@ -16,7 +16,7 @@ This project adds experimental Keychain support for Mac OS X.
 
 To install with Homebrew:
 
-    brew install --HEAD brandt/personal/openconnect-keychain
+    brew install brandt/personal/openconnect-keychain
 
 To avoid collision with the upstream package, the executable is: `openconnect-keychain`
 
