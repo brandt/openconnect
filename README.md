@@ -2,8 +2,6 @@
 
 This is a fork of the OpenConnect VPN project that adds Mac OS X Keychain support.
 
-It's still very hackish.  Use with caution.
-
 
 ## About
 
@@ -13,6 +11,16 @@ This project adds experimental Keychain support for Mac OS X.
 
 
 ## Installation
+
+### Homebrew
+
+To install with Homebrew:
+
+    brew install --HEAD brandt/personal/openconnect-keychain
+
+To avoid collision with the upstream package, the executable is: `openconnect-keychain`
+
+## Manual
 
 The build and install procedures don't differ from the standard OpenConnect package.
 
@@ -25,34 +33,30 @@ For the sake of completeness, here are the procedures:
 
 Assumes you already have Homebrew installed.
 
-
-#### Build Requirements
-
+    # Build requirements
     brew install autoconf automake libtool pkg-config
-
-
-#### Runtime Requirements
-
+    
+    # Runtime Requirements
     brew install gettext gnutls
 
 
 ### Building
 
-First we have to do some prep work to get the `vpnc-script` setup in advance:
+First, we have to do some prep work to get the `vpnc-script` setup in advance:
 
     export INSTALL_DIR="/tmp/openconnect"  # or wherever...
-    mkdir -p "${INSTALL_DIR}/etc" "${INSTALL_DIR}/bin" "${INSTALL_DIR}/var"
-    curl http://git.infradead.org/users/dwmw2/vpnc-scripts.git/blob_plain/a64e23b1b6602095f73c4ff7fdb34cccf7149fd5:/vpnc-script -o "${INSTALL_DIR}/etc/vpnc-script"
+    mkdir -p "$INSTALL_DIR"/{bin,var,etc}
+    curl http://git.infradead.org/users/dwmw2/vpnc-scripts.git/blob_plain/6e04e0bbb66c0bf0ae055c0f4e58bea81dbb5c3c:/vpnc-script -o "${INSTALL_DIR}/etc/vpnc-script"
     chmod +rx "${INSTALL_DIR}/etc/vpnc-script"
 
-Now we can run through the (mostly) standard build process:
+Then run through the standard build process:
 
     export LIBTOOLIZE="glibtoolize"
     ./autogen.sh
     ./configure --prefix="$INSTALL_DIR" --localstatedir="${INSTALL_DIR}/var" --with-vpnc-script="${INSTALL_DIR}/etc/vpnc-script" --sbindir="${INSTALL_DIR}/bin" --disable-nls
     make
 
-Then to install, just run:
+To install, run:
 
     make install
 
@@ -69,6 +73,8 @@ Note: Keychain integration is for the primary password only.  Second passphrases
 For a good reference on building OpenConnect on Mac OS X, see the Homebrew formula (`brew cat openconnect`).
 
 The upstream project: http://www.infradead.org/openconnect/
+
+The `openconnect-keychain` Homebrew formula is available here: https://github.com/brandt/homebrew-personal/blob/master/openconnect-keychain.rb
 
 
 ## License
