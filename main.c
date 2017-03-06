@@ -1933,17 +1933,17 @@ static int process_auth_form_cb(void *_vpninfo,
 				opt->_value = username;  // fill-in the form
 				username = NULL;
 			} else {
-				username = prompt_for_input(opt->label, vpninfo, 0);
-				opt->_value = username;
+				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
 			}
 
 			if (!opt->_value) {
 				goto err;
-			} else {
-				// we want to reset the keychain name any time username was provided
-				keychain = build_keychain_name(opt->_value, vpninfo->hostname);
 			}
+
 			empty = 0;
+
+			// we want to reset the keychain name any time username was provided
+			keychain = build_keychain_name(opt->_value, vpninfo->hostname);
 
 		} else if (opt->type == OC_FORM_OPT_PASSWORD) {
 			// printf("Entering password section...\n");
