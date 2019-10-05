@@ -3,19 +3,20 @@ image: fedora:latest
 CentOS7/GnuTLS:
   image: centos:7
   script:
+  - yum update -y
   - yum install -y epel-release
   - yum install -y git autoconf automake libtool python gettext
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
     'pkgconfig(gnutls)' trousers-devel 'pkgconfig(libpcsclite)'
     'pkgconfig(libproxy-1.0)' 'pkgconfig(liboath)' 'pkgconfig(stoken)'
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
-    vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
-    java-devel-openjdk
+    vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)' tss2-devel
+    java-devel-openjdk iproute iputils nuttcp
   - ./autogen.sh
-  - ./configure --with-java
+  - ./configure --with-java CFLAGS=-g
   - make -j4
-  # XFAIL the auth-pkcs11 test because GnuTLS 3.3.8 doesn't support pin-value
-  - make VERBOSE=1 -j4 check
+# UTF-8 support is not available
+  - make VERBOSE=1 XFAIL_TESTS="auth-nonascii" -j4 check
   tags:
   - shared
   except:
@@ -29,6 +30,7 @@ CentOS7/GnuTLS:
 CentOS7/OpenSSL:
   image: centos:7
   script:
+  - yum update -y
   - yum install -y epel-release
   - yum install -y git autoconf automake libtool python gettext
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
@@ -36,11 +38,12 @@ CentOS7/OpenSSL:
     'pkgconfig(libproxy-1.0)' 'pkgconfig(liboath)' 'pkgconfig(stoken)'
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
     vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
-    java-devel-openjdk 'pkgconfig(libp11)'
+    java-devel-openjdk 'pkgconfig(libp11)' iproute iputils nuttcp
   - ./autogen.sh
-  - ./configure --without-gnutls --with-openssl --with-java --without-openssl-version-check --enable-dtls-xfail --disable-dsa-tests
+  - ./configure --without-gnutls --with-openssl --with-java --without-openssl-version-check --enable-dtls-xfail --disable-dsa-tests CFLAGS=-g
   - make -j4
-  - make VERBOSE=1 -j4 check
+# UTF-8 support is not available
+  - make VERBOSE=1 XFAIL_TESTS="auth-nonascii" -j4 check
   tags:
   - shared
   except:
@@ -54,7 +57,11 @@ CentOS7/OpenSSL:
 CentOS6/OpenSSL:
   image: centos:6
   script:
+  - yum update -y
   - yum install -y epel-release
+  - yum -y reinstall glibc-common
+  - localedef -i cs_CZ -f UTF-8 cs_CZ.UTF-8
+  - localedef -i cs_CZ -f ISO-8859-2 cs_CZ.ISO8859-2
   - yum install -y git autoconf automake libtool python gettext
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
     'pkgconfig(gnutls)' trousers-devel 'pkgconfig(libpcsclite)'
@@ -62,10 +69,12 @@ CentOS6/OpenSSL:
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
     vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
     java-devel-openjdk vpnc 'pkgconfig(libp11)' 'pkgconfig(p11-kit-1)'
+    iproute iputils nuttcp
   - ./autogen.sh
-  - ./configure --with-java --without-openssl-version-check --enable-dtls-xfail
+  - ./configure --with-java --without-openssl-version-check --enable-dtls-xfail CFLAGS=-g
   - make -j4
-  - make VERBOSE=1 -j4 check
+# UTF-8 support is not available
+  - make VERBOSE=1 XFAIL_TESTS="bad_dtls_test auth-nonascii" -j4 check
   tags:
   - shared
   except:
@@ -78,15 +87,19 @@ CentOS6/OpenSSL:
 
 Fedora/GnuTLS:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
     'pkgconfig(gnutls)' trousers-devel 'pkgconfig(libpcsclite)'
     'pkgconfig(libproxy-1.0)' 'pkgconfig(liboath)' 'pkgconfig(stoken)'
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
-    vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
-    java-devel-openjdk
+    vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)' tss2-devel
+    java-devel-openjdk glibc-langpack-cs iproute iputils nuttcp
   - ./autogen.sh
-  - ./configure --with-java
+  - ./configure --with-java --disable-dsa-tests CFLAGS=-g
+  - make tmp-distdir
+  - cd openconnect-$(git describe --tags | sed s/^v//)
+  - ./configure --with-java --disable-dsa-tests CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -101,15 +114,19 @@ Fedora/GnuTLS:
 
 Fedora/GnuTLS/clang:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
     'pkgconfig(gnutls)' trousers-devel 'pkgconfig(libpcsclite)'
     'pkgconfig(libproxy-1.0)' 'pkgconfig(liboath)' 'pkgconfig(stoken)'
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
-    vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
-    java-devel-openjdk clang
+    vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)' tss2-devel
+    java-devel-openjdk clang glibc-langpack-cs iproute iputils nuttcp
   - ./autogen.sh
-  - ./configure --with-java CC=clang
+  - ./configure --with-java --disable-dsa-tests CC=clang CFLAGS=-g
+  - make tmp-distdir
+  - cd openconnect-$(git describe --tags | sed s/^v//)
+  - ./configure --with-java --disable-dsa-tests CC=clang CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -124,16 +141,21 @@ Fedora/GnuTLS/clang:
 
 Fedora/OpenSSL:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
     'pkgconfig(gnutls)' trousers-devel 'pkgconfig(libpcsclite)'
     'pkgconfig(libproxy-1.0)' 'pkgconfig(liboath)' 'pkgconfig(stoken)'
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
     vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
-    java-devel-openjdk 'pkgconfig(libp11)'
-  - dnf --enablerepo=updates-testing update -y libp11\* gnutls
+    java-devel-openjdk glibc-langpack-cs iproute iputils nuttcp
+# Re-enable DSA since we test it
+  - update-crypto-policies --set LEGACY
   - ./autogen.sh
-  - ./configure --without-gnutls --with-openssl --without-openssl-version-check --disable-dsa-tests
+  - ./configure --without-gnutls --with-openssl --without-openssl-version-check --disable-dsa-tests CFLAGS=-g
+  - make tmp-distdir
+  - cd openconnect-$(git describe --tags | sed s/^v//)
+  - ./configure --without-gnutls --with-openssl --without-openssl-version-check --disable-dsa-tests CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -148,16 +170,21 @@ Fedora/OpenSSL:
 
 Fedora/OpenSSL/clang:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     'pkgconfig(openssl)' 'pkgconfig(libxml-2.0)' 'pkgconfig(liblz4)'
     'pkgconfig(gnutls)' trousers-devel 'pkgconfig(libpcsclite)'
     'pkgconfig(libproxy-1.0)' 'pkgconfig(liboath)' 'pkgconfig(stoken)'
     ocserv softhsm 'pkgconfig(uid_wrapper)' 'pkgconfig(socket_wrapper)'
     vpnc-script 'pkgconfig(libpskc)' 'pkgconfig(libpcsclite)'
-    java-devel-openjdk 'pkgconfig(libp11)' clang
-  - dnf --enablerepo=updates-testing update -y libp11\* gnutls
+    java-devel-openjdk clang glibc-langpack-cs iproute iputils nuttcp
+# Re-enable DSA since we test it
+  - update-crypto-policies --set LEGACY
   - ./autogen.sh
-  - ./configure CC=clang --without-gnutls --with-openssl --without-openssl-version-check --disable-dsa-tests
+  - ./configure CC=clang --without-gnutls --with-openssl --without-openssl-version-check --disable-dsa-tests CFLAGS=-g
+  - make tmp-distdir
+  - cd openconnect-$(git describe --tags | sed s/^v//)
+  - ./configure CC=clang --without-gnutls --with-openssl --without-openssl-version-check --disable-dsa-tests CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -172,13 +199,14 @@ Fedora/OpenSSL/clang:
 
 MinGW32/GnuTLS:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     mingw32-gnutls mingw32-openssl mingw32-libxml2 mingw32-zlib
-    mingw32-gcc wine.i686 make
+    mingw32-gcc wine.i686 make iproute iputils nuttcp
   - mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
   - echo ':DOSWin:M::MZ::/usr/bin/wine:' > /proc/sys/fs/binfmt_misc/register
   - ./autogen.sh
-  - mingw32-configure
+  - mingw32-configure CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -193,13 +221,14 @@ MinGW32/GnuTLS:
 
 MinGW32/OpenSSL:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     mingw32-gnutls mingw32-openssl mingw32-libxml2 mingw32-zlib
-    mingw32-gcc wine.i686 make
+    mingw32-gcc wine.i686 make iproute iputils nuttcp
   - mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
   - echo ':DOSWin:M::MZ::/usr/bin/wine:' > /proc/sys/fs/binfmt_misc/register
   - ./autogen.sh
-  - mingw32-configure --without-gnutls --with-openssl --without-openssl-version-check
+  - mingw32-configure --without-gnutls --with-openssl --without-openssl-version-check CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -214,13 +243,14 @@ MinGW32/OpenSSL:
 
 MinGW64/GnuTLS:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     mingw64-gnutls mingw64-openssl mingw64-libxml2 mingw64-zlib
-    mingw64-gcc wine.i686 make
+    mingw64-gcc wine.i686 make iproute iputils nuttcp
   - mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
   - echo ':DOSWin:M::MZ::/usr/bin/wine:' > /proc/sys/fs/binfmt_misc/register
   - ./autogen.sh
-  - mingw64-configure
+  - mingw64-configure CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:
@@ -235,13 +265,14 @@ MinGW64/GnuTLS:
 
 MinGW64/OpenSSL:
   script:
-  - dnf install -y git autoconf automake libtool python gettext
+  - dnf update -y
+  - dnf install -y git autoconf automake libtool python gettext make
     mingw64-gnutls mingw64-openssl mingw64-libxml2 mingw64-zlib
-    mingw64-gcc wine.x86_64 make
+    mingw64-gcc wine.x86_64 make iproute iputils nuttcp
   - mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
   - echo ':DOSWin:M::MZ::/usr/bin/wine:' > /proc/sys/fs/binfmt_misc/register
   - ./autogen.sh
-  - mingw64-configure --without-gnutls --with-openssl --without-openssl-version-check
+  - mingw64-configure --without-gnutls --with-openssl --without-openssl-version-check CFLAGS=-g
   - make -j4
   - make VERBOSE=1 -j4 check
   tags:

@@ -11,20 +11,23 @@ USER_KEYS = \
 	$(certsdir)/user-key-aes256-cbc-sha256.p12
 
 # We know GnuTLS doesn't support these for now. https://bugzilla.redhat.com/1369484
+OSSL_KEYS = \
+	$(certsdir)/user-key-md5-des-sha1.p12 $(certsdir)/user-key-aes256-cbc-md5-des-sha256.p12 \
+	$(certsdir)/user-key-pkcs8-pbes2-sha256.pem $(certsdir)/user-key-pkcs8-pbes2-sha256.der \
+	$(certsdir)/user-key-pkcs8-pbes1-md5-des.pem $(certsdir)/user-key-pkcs8-pbes1-md5-des.der
 if OPENCONNECT_OPENSSL
-USER_KEYS += $(certsdir)/user-key-md5-des-sha1.p12
-USER_KEYS += $(certsdir)/user-key-aes256-cbc-md5-des-sha256.p12
-USER_KEYS += $(certsdir)/user-key-pkcs8-pbes2-sha256.pem $(certsdir)/user-key-pkcs8-pbes2-sha256.der
-USER_KEYS += $(certsdir)/user-key-pkcs8-pbes1-md5-des.pem $(certsdir)/user-key-pkcs8-pbes1-md5-des.der
-endif # OPENCONNECT_OPENSSL
+USER_KEYS += $(OSSL_KEYS)
+endif
 
-if TEST_DSA
-USER_KEYS += $(certsdir)/dsa-key-pkcs1.pem $(certsdir)/dsa-key-pkcs1.der \
+DSA_KEYS = \
+	$(certsdir)/dsa-key-pkcs1.pem $(certsdir)/dsa-key-pkcs1.der \
 	$(certsdir)/dsa-key-pkcs1-aes128.pem \
 	$(certsdir)/dsa-key-pkcs8.pem $(certsdir)/dsa-key-pkcs8.der \
 	$(certsdir)/dsa-key-pkcs8-pbes2-sha1.pem $(certsdir)/dsa-key-pkcs8-pbes2-sha1.der \
 	$(certsdir)/dsa-key-aes256-cbc-sha256.p12
-endif # TEST_DSA
+if TEST_DSA
+USER_KEYS += $(DSA_KEYS)
+endif
 
 USER_KEYS += $(certsdir)/ec-key-pkcs1.pem $(certsdir)/ec-key-pkcs1.der \
 	$(certsdir)/ec-key-pkcs1-aes128.pem \
@@ -35,14 +38,21 @@ USER_KEYS += $(certsdir)/ec-key-pkcs1.pem $(certsdir)/ec-key-pkcs1.der \
 USER_CERTS = $(certsdir)/user-cert.pem $(certsdir)/dsa-cert.pem $(certsdir)/ec-cert.pem
 
 EXTRA_DIST = certs/ca.pem certs/ca-key.pem certs/user-cert.pem $(USER_KEYS) $(USER_CERTS) \
+	$(OSSL_KEYS) $(DSA_KEYS) $(certsdir)/user-key-nonascii-password.p12 \
+	pass-UTF-8 pass-ISO8859-2 \
 	certs/server-cert.pem certs/server-key.pem configs/test1.passwd \
 	common.sh configs/test-user-cert.config configs/test-user-pass.config \
-	configs/user-cert.prm softhsm2.conf.in softhsm .config/pkcs11/modules/softhsm2.module
+	configs/user-cert.prm softhsm2.conf.in softhsm ns.sh configs/test-dtls-psk.config \
+	scripts/vpnc-script scripts/vpnc-script-detect-disconnect
 
 dist_check_SCRIPTS =
 
+if HAVE_NETNS
+dist_check_SCRIPTS += dtls-psk sigterm
+endif
+
 if HAVE_CWRAP
-dist_check_SCRIPTS += auth-username-pass auth-certificate id-test
+dist_check_SCRIPTS += auth-username-pass auth-certificate auth-nonascii id-test
 
 if TEST_PKCS11
 dist_check_SCRIPTS += auth-pkcs11
@@ -99,7 +109,7 @@ keyfiles: $(USER_KEYS) $(USER_CERTS)
 
 OPENSSL = openssl
 OSSLARGS = -in $< -out $@ -passout pass:password
-OSSLARGSP12 = -inkey $< -out $@ -in $${KEYFILE%-key-pkcs8.pem}-cert.pem -passout pass:password
+OSSLARGSP12 = -inkey $< -out $@ -in $${KEYFILE%-key-pkcs8.pem}-cert.pem -passout pass:$${PASSWORD%-password}
 
 # Strictly speaking this is only PKCS#1 for RSA. For EC it's probably
 # best described as RFC5915§4, and no idea what defines it for DSA.
@@ -156,6 +166,12 @@ $(certsdir)/ec-key-pkcs1-aes128.pem: certs/ec-key-pkcs1.pem
 	KEYFILE="$<"; $(OPENSSL) pkcs12 $(OSSLARGSP12) -export -macalg SHA256 \
 		-certpbe AES-256-CBC -keypbe AES-256-CBC
 
+# NB: Needs OpenSSL 1.1 or newer
+%-key-nonascii-password.p12: %-key-pkcs8.pem %-cert.pem
+	LC_ALL=en_GB.UTF-8 PASSWORD="$$(cat $(srcdir)/pass-UTF-8)" KEYFILE="$<" ; \
+	$(OPENSSL) pkcs12 $(OSSLARGSP12) -export -macalg SHA256 \
+		-certpbe AES-256-CBC -keypbe AES-256-CBC
+
 # This one makes GnuTLS behave strangely...
 %-key-aes256-cbc-md5-des-sha256.p12: %-key-pkcs8.pem %-cert.pem
 	KEYFILE="$<"; $(OPENSSL) pkcs12 $(OSSLARGSP12) -export -macalg SHA256 \
@@ -171,8 +187,8 @@ $(certsdir)/ec-key-pkcs1-aes128.pem: certs/ec-key-pkcs1.pem
 	$(OPENSSL) x509 -days 3650 -CA $(certsdir)/ca.pem -CAkey $(certsdir)/ca-key.pem \
 		-set_serial $(shell date +%s) -req -out $@ -in $<
 
-SHM2_UTIL=HOME=$(srcdir) SOFTHSM2_CONF=softhsm2.conf softhsm2-util
-P11TOOL=HOME=$(srcdir) SOFTHSM2_CONF=softhsm2.conf p11tool
+SHM2_UTIL=SOFTHSM2_CONF=softhsm2.conf softhsm2-util
+P11TOOL=SOFTHSM2_CONF=softhsm2.conf p11tool
 
 # Nice and simple: Certs visible without login, public keys present in token
 softhsm-setup0:

@@ -24,50 +24,35 @@
 
 #include "openconnect-internal.h"
 
-#ifndef HAVE_GNUTLS_PKCS12_SIMPLE_PARSE
-/* If we're using a version of GnuTLS from before this was
-   exported, pull in our local copy. */
-int gnutls_pkcs12_simple_parse(gnutls_pkcs12_t p12, const char *password,
-			       gnutls_x509_privkey_t *key,
-			       gnutls_x509_crt_t **chain,
-			       unsigned int *chain_len,
-			       gnutls_x509_crt_t **extra_certs,
-			       unsigned int *extra_certs_len,
-			       gnutls_x509_crl_t *crl,
-			       unsigned int flags);
+int load_tpm1_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
+		  gnutls_privkey_t *pkey, gnutls_datum_t *pkey_sig);
+void release_tpm1_ctx(struct openconnect_info *info);
 
-#endif /* !HAVE_GNUTLS_PKCS12_SIMPLE_PARSE */
-
-
-#ifndef HAVE_GNUTLS_CERTIFICATE_SET_KEY
-int gtls2_tpm_sign_cb(gnutls_session_t sess, void *_vpninfo,
-		      gnutls_certificate_type_t cert_type,
-		      const gnutls_datum_t *cert, const gnutls_datum_t *data,
-		      gnutls_datum_t *sig);
-int gtls2_tpm_sign_dummy_data(struct openconnect_info *vpninfo,
-			      const gnutls_datum_t *data,
-			      gnutls_datum_t *sig);
-#endif /* !HAVE_GNUTLS_CERTIFICATE_SET_KEY */
-
-/* In GnuTLS 2.12 this can't be a real private key; we have to use the sign_callback
-   instead. But we want to set the 'pkey' variable to *something* non-NULL in order
-   to indicate that we aren't just using an x509 key. */
-#define OPENCONNECT_TPM_PKEY ((void *)1UL)
-
-static inline int sign_dummy_data(struct openconnect_info *vpninfo,
-				  gnutls_privkey_t pkey,
-				  const gnutls_datum_t *data,
-				  gnutls_datum_t *sig)
-{
-#if defined(HAVE_TROUSERS) && !defined(HAVE_GNUTLS_CERTIFICATE_SET_KEY)
-	if (pkey == OPENCONNECT_TPM_PKEY)
-		return gtls2_tpm_sign_dummy_data(vpninfo, data, sig);
-#endif
-	return gnutls_privkey_sign_data(pkey, GNUTLS_DIG_SHA1, 0, data, sig);
-}
-
-int load_tpm_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
+int load_tpm2_key(struct openconnect_info *vpninfo, gnutls_datum_t *fdata,
 		 gnutls_privkey_t *pkey, gnutls_datum_t *pkey_sig);
+void release_tpm2_ctx(struct openconnect_info *info);
+int install_tpm2_key(struct openconnect_info *vpninfo, gnutls_privkey_t *pkey, gnutls_datum_t *pkey_sig,
+		     unsigned int parent, int emptyauth, int legacy,
+		     gnutls_datum_t *privdata, gnutls_datum_t *pubdata);
+
+int tpm2_rsa_sign_hash_fn(gnutls_privkey_t key, gnutls_sign_algorithm_t algo,
+			  void *_vpninfo, unsigned int flags,
+			  const gnutls_datum_t *data, gnutls_datum_t *sig);
+int tpm2_ec_sign_hash_fn(gnutls_privkey_t key, gnutls_sign_algorithm_t algo,
+			 void *_vpninfo, unsigned int flags,
+			 const gnutls_datum_t *data, gnutls_datum_t *sig);
+int oc_pkcs1_pad(struct openconnect_info *vpninfo,
+		 unsigned char *buf, int size, const gnutls_datum_t *data);
+
+/* GnuTLS 3.6.0+ provides this. We have our own for older GnuTLS. There is
+ * also _gnutls_encode_ber_rs_raw() in some older versions, but there were
+ * zero-padding bugs in that, and some of the... less diligently maintained
+ * distributions (like Ubuntu even in 18.04) don't have the fix yet, two
+ * years later. */
+#if GNUTLS_VERSION_NUMBER < 0x030600
+#define gnutls_encode_rs_value oc_gnutls_encode_rs_value
+int oc_gnutls_encode_rs_value(gnutls_datum_t *sig_value, const gnutls_datum_t *r, const gnutls_datum_t *s);
+#endif
 
 char *get_gnutls_cipher(gnutls_session_t session);
 

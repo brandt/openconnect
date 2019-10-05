@@ -35,6 +35,24 @@ int xmlnode_is_named(xmlNode *xml_node, const char *name)
 	return !strcmp((char *)xml_node->name, name);
 }
 
+/* similar to auth.c's xmlnode_get_text, including that *var should be freed by the caller,
+   but without the hackish param / %s handling that Cisco needs. */
+int xmlnode_get_val(xmlNode *xml_node, const char *name, char **var)
+{
+	char *str;
+
+	if (name && !xmlnode_is_named(xml_node, name))
+		return -EINVAL;
+
+	str = (char *)xmlNodeGetContent(xml_node);
+	if (!str)
+		return -ENOENT;
+
+	free(*var);
+	*var = str;
+	return 0;
+}
+
 int xmlnode_get_prop(xmlNode *xml_node, const char *name, char **var)
 {
 	char *str = (char *)xmlGetProp(xml_node, (unsigned char *)name);
@@ -91,12 +109,39 @@ int append_form_opts(struct openconnect_info *vpninfo,
 	return 0;
 }
 
+void clear_mem(void *p, size_t s)
+{
+#if defined(HAVE_MEMSET_S)
+	memset_s(p, s, 0x5a, s);
+#elif defined(HAVE_EXPLICIT_MEMSET)
+	explicit_memset(p, 0x5a, s);
+#elif defined(HAVE_EXPLICIT_BZERO)
+	explicit_bzero(p, s);
+#elif defined(_WIN32)
+	SecureZeroMemory(p, s);
+#else
+	volatile char *pp = (volatile char *)p;
+	while (s--)
+		*(pp++) = 0x5a;
+#endif
+}
+
+void free_pass(char **p)
+{
+	if (!*p)
+		return;
+
+	clear_mem(*p, strlen(*p));
+	free(*p);
+	*p = NULL;
+}
+
 void free_opt(struct oc_form_opt *opt)
 {
 	/* for SELECT options, opt->value is a pointer to oc_choice->name */
-	if (opt->type != OC_FORM_OPT_SELECT)
-		free(opt->_value);
-	else {
+	if (opt->type != OC_FORM_OPT_SELECT) {
+		free_pass(&opt->_value);
+	} else {
 		struct oc_form_opt_select *sel = (void *)opt;
 		int i;
 

@@ -99,17 +99,31 @@ int verify_packet_seqno(struct openconnect_info *vpninfo,
 		/* delta==0 is the overflow case where esp->seq is 0x100000000 and seq is 0 */
 		if (delta > 65 || delta == 0) {
 			/* Too old. We can't know if it's a replay. */
-			vpn_progress(vpninfo, PRG_DEBUG,
-				     _("Discarding ancient ESP packet with seq %u (expected %" PRIu64 ")\n"),
-				     seq, esp->seq);
-			return -EINVAL;
+			if (vpninfo->esp_replay_protect) {
+				vpn_progress(vpninfo, PRG_DEBUG,
+					     _("Discarding ancient ESP packet with seq %u (expected %" PRIu64 ")\n"),
+					     seq, esp->seq);
+				return -EINVAL;
+			} else {
+				vpn_progress(vpninfo, PRG_DEBUG,
+					     _("Tolerating ancient ESP packet with seq %u (expected %" PRIu64 ")\n"),
+					     seq, esp->seq);
+				return 0;
+			}
 		} else if (delta == 1) {
 			/* Not in the bitmask since it is by definition already received. */
 		replayed:
-			vpn_progress(vpninfo, PRG_DEBUG,
-				     _("Discarding replayed ESP packet with seq %u\n"),
-				     seq);
-			return -EINVAL;
+			if (vpninfo->esp_replay_protect) {
+				vpn_progress(vpninfo, PRG_DEBUG,
+					     _("Discarding replayed ESP packet with seq %u\n"),
+					     seq);
+				return -EINVAL;
+			} else {
+				vpn_progress(vpninfo, PRG_DEBUG,
+					     _("Tolerating replayed ESP packet with seq %u\n"),
+					     seq);
+				return 0;
+			}
 		} else {
 			/* Within the backlog window, so we remember whether we've seen it or not. */
 			uint64_t mask = 1ULL << (delta - 2);

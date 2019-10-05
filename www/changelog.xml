@@ -15,7 +15,75 @@
 <ul>
    <li><b>OpenConnect HEAD</b>
      <ul>
-       <li><i>No changelog entries yet</i></li>
+       <li>Fix Windows build with MSYS2 (<a href="https://gitlab.com/openconnect/openconnect/issues/74">#74</a>).</li>
+     </ul><br/>
+  </li>
+  <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.05.tar.gz">OpenConnect v8.05</a></b>
+     <i>(<a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.05.tar.gz.asc">PGP signature</a>)</i> &#8212; 2019-09-12
+     <ul>
+       <li>Fix GlobalProtect ESP stall (<a href="https://gitlab.com/openconnect/openconnect/merge_requests/55">#55</a>).</li>
+       <li>Fix HTTP chunked encoding buffer overflow (CVE-2019-16239).</li>
+     </ul><br/>
+  </li>
+  <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.04.tar.gz">OpenConnect v8.04</a></b>
+     <i>(<a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.04.tar.gz.asc">PGP signature</a>)</i> &#8212; 2019-08-09
+     <ul>
+       <li>Rework DTLS MTU detection. (<a href="https://gitlab.com/openconnect/openconnect/issues/10">#10</a>)</li>
+       <li>Add Pulse Connect Secure support.</li>
+       <li>OpenSSL build fixes (<a href="https://gitlab.com/openconnect/openconnect/merge_requests/51">#51</a>).</li>
+       <li>Add HMAC-SHA256-128 (RFC4868) support for ESP.</li>
+       <li>Support IPv6 in ESP.</li>
+       <li>Translate user-visible strings from <tt>openconnect_get_supported_protocols()</tt>.</li>
+       <li>Fix proxy username/password handling to allow special characters and escaping.</li>
+     </ul><br/>
+  </li>
+  <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.03.tar.gz">OpenConnect v8.03</a></b>
+     <i>(<a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.03.tar.gz.asc">PGP signature</a>)</i> &#8212; 2019-05-18
+     <ul>
+       <li>Fix detection of <tt>utun</tt> support on OS X (<a href="https://gitlab.com/openconnect/openconnect/issues/18">#18</a>).</li>
+       <li>Fix Cisco DTLSv1.2 support for <tt>AES256-GCM-SHA384</tt>.</li>
+       <li>Fix Solaris 11.4 build by properly detecting <tt>memset_s()</tt>.</li>
+       <li>Fix recognition of OTP password fields (<a href="https://gitlab.com/openconnect/openconnect/issues/24">#24</a>).</li>
+     </ul><br/>
+  </li>
+  <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.02.tar.gz">OpenConnect v8.02</a></b>
+     <i>(<a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.02.tar.gz.asc">PGP signature</a>)</i> &#8212; 2019-01-16
+     <ul>
+       <li>Fix GNU/Hurd build.</li>
+       <li>Discover <tt>vpnc-script</tt> in default packaged location on FreeBSD/OpenBSD.</li>
+       <li>Support split-exclude routes for GlobalProtect.</li>
+       <li>Fix GnuTLS builds without libtasn1.</li>
+       <li>Fix DTLS support with OpenSSL 1.1.1+.</li>
+       <li>Add Cisco-compatible DTLSv1.2 support.</li>
+       <li>Invoke script with <tt>reason=attempt-reconnect</tt> before doing so.</li>
+     </ul><br/>
+  </li>
+  <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.01.tar.gz">OpenConnect v8.01</a></b>
+     <i>(<a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.01.tar.gz.asc">PGP signature</a>)</i> &#8212; 2019-01-05
+     <ul>
+       <li>Fix <tt>memset_s()</tt> arguments.</li>
+       <li>Fix OpenBSD build.</li>
+     </ul><br/>
+  </li>
+  <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.00.tar.gz">OpenConnect v8.00</a></b>
+     <i>(<a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-8.00.tar.gz.asc">PGP signature</a>)</i> &#8212; 2019-01-05
+     <ul>
+       <li>Clear form submissions (which may include passwords) before freeing (CVE-2018-20319).</li>
+       <li>Allow form responses to be provided on command line.</li>
+       <li>Add support for SSL keys stored in <a href="tpm.html">TPM2</a>.</li>
+       <li>Fix ESP rekey when replay protection is disabled.</li>
+       <li>Drop support for GnuTLS older than 3.2.10.</li>
+       <li>Fix <tt>--passwd-on-stdin</tt> for Windows to not forcibly open console.</li>
+       <li>Fix portability of shell scripts in test suite.</li>
+       <li>Add Google Authenticator TOTP support for Juniper.</li>
+       <li>Add RFC7469 key PIN support for cert hashes.</li>
+       <li>Add protocol method to securely log out the Juniper session.</li>
+       <li>Relax requirements for Juniper hostname packet response to support old gateways.</li>
+       <li>Add API functions to query the supported protocols.</li>
+       <li>Verify ESP sequence numbers and warn even if replay protection is disabled.</li>
+       <li>Add support for PAN GlobalProtect VPN protocol (<tt>--protocol=gp</tt>).</li>
+       <li>Reorganize listing of command-line options, and include information on supported protocols.</li>
+       <li>SIGTERM cleans up the session similarly to SIGINT.</li>
      </ul><br/>
   </li>
   <li><b><a href="ftp://ftp.infradead.org/pub/openconnect/openconnect-7.08.tar.gz">OpenConnect v7.08</a></b>
@@ -623,4 +691,3 @@
 </ul>
 	<INCLUDE file="inc/footer.tmpl" />
 </PAGE>
-

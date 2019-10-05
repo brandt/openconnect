@@ -100,8 +100,8 @@ static int dtls_get_data_mtu(struct openconnect_info *vpninfo, int mtu)
 	}
 #else
 	/* OpenSSL <= 1.0.2 only supports CBC ciphers with PSK */
-	ivlen = EVP_CIPHER_iv_length(EVP_CIPHER_CTX_cipher(vpninfo->dtls_ssl->enc_write_ctx));
-	maclen = EVP_MD_CTX_size(vpninfo->dtls_ssl->write_hash);
+	ivlen = EVP_CIPHER_iv_length(EVP_CIPHER_CTX_cipher(vpninfo->dtls_ssl->enc_read_ctx));
+	maclen = EVP_MD_CTX_size(vpninfo->dtls_ssl->read_hash);
 	blocksize = ivlen;
 	pad = 1;
 #endif
@@ -187,22 +187,38 @@ static void buf_append_OCTET_STRING(struct oc_text_buf *buf, void *data, int len
 }
 
 static SSL_SESSION *generate_dtls_session(struct openconnect_info *vpninfo,
-					  int dtlsver, const SSL_CIPHER *cipher)
+					  int dtlsver, const SSL_CIPHER *cipher,
+					  unsigned rnd_key)
 {
 	struct oc_text_buf *buf = buf_alloc();
 	SSL_SESSION *dtls_session;
 	const unsigned char *asn;
 	uint16_t cid;
+	uint8_t rnd_secret[TLS_MASTER_KEY_SIZE];
 
 	buf_append_bytes(buf, "\x30\x80", 2); // SEQUENCE, indeterminate length
 	buf_append_INTEGER(buf, 1 /* SSL_SESSION_ASN1_VERSION */);
 	buf_append_INTEGER(buf, dtlsver);
 	store_be16(&cid, SSL_CIPHER_get_id(cipher) & 0xffff);
 	buf_append_OCTET_STRING(buf, &cid, 2);
-	buf_append_OCTET_STRING(buf, vpninfo->dtls_session_id,
-				sizeof(vpninfo->dtls_session_id));
-	buf_append_OCTET_STRING(buf, vpninfo->dtls_secret,
-				sizeof(vpninfo->dtls_secret));
+	if (rnd_key) {
+		buf_append_OCTET_STRING(buf, vpninfo->dtls_app_id,
+					vpninfo->dtls_app_id_size);
+
+		if (openconnect_random(rnd_secret, sizeof(rnd_secret))) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to generate random key\n"));
+			buf_free(buf);
+			return NULL;
+		}
+		buf_append_OCTET_STRING(buf, rnd_secret, sizeof(rnd_secret));
+	} else {
+		buf_append_OCTET_STRING(buf, vpninfo->dtls_session_id,
+					sizeof(vpninfo->dtls_session_id));
+
+		buf_append_OCTET_STRING(buf, vpninfo->dtls_secret,
+					sizeof(vpninfo->dtls_secret));
+	}
 	/* If the length actually fits in one byte (which it should), do
 	 * it that way.  Else, leave it indeterminate and add two
 	 * end-of-contents octets to mark the end of the SEQUENCE. */
@@ -233,9 +249,11 @@ static SSL_SESSION *generate_dtls_session(struct openconnect_info *vpninfo,
 }
 #else /* OpenSSL before 1.1 */
 static SSL_SESSION *generate_dtls_session(struct openconnect_info *vpninfo,
-					  int dtlsver, const SSL_CIPHER *cipher)
+					  int dtlsver, const SSL_CIPHER *cipher,
+					  unsigned rnd_key)
 {
 	SSL_SESSION *dtls_session = SSL_SESSION_new();
+
 	if (!dtls_session) {
 		vpn_progress(vpninfo, PRG_ERR,
 			     _("Initialise DTLSv1 session failed\n"));
@@ -243,13 +261,33 @@ static SSL_SESSION *generate_dtls_session(struct openconnect_info *vpninfo,
 	}
 
 	dtls_session->ssl_version = dtlsver;
-	dtls_session->master_key_length = sizeof(vpninfo->dtls_secret);
-	memcpy(dtls_session->master_key, vpninfo->dtls_secret,
-	       sizeof(vpninfo->dtls_secret));
+	dtls_session->master_key_length = TLS_MASTER_KEY_SIZE;
 
-	dtls_session->session_id_length = sizeof(vpninfo->dtls_session_id);
-	memcpy(dtls_session->session_id, vpninfo->dtls_session_id,
-	       sizeof(vpninfo->dtls_session_id));
+	if (rnd_key) {
+		if (openconnect_random(dtls_session->master_key, TLS_MASTER_KEY_SIZE)) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Failed to generate random key\n"));
+			return NULL;
+		}
+
+		if (vpninfo->dtls_app_id_size > sizeof(dtls_session->session_id)) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Too large application ID size\n"));
+			return NULL;
+		}
+
+		dtls_session->session_id_length = vpninfo->dtls_app_id_size;
+		memcpy(dtls_session->session_id, vpninfo->dtls_app_id,
+		       vpninfo->dtls_app_id_size);
+	} else {
+		memcpy(dtls_session->master_key, vpninfo->dtls_secret,
+		       sizeof(vpninfo->dtls_secret));
+
+		dtls_session->session_id_length = sizeof(vpninfo->dtls_session_id);
+		memcpy(dtls_session->session_id, vpninfo->dtls_session_id,
+		       sizeof(vpninfo->dtls_session_id));
+	}
+
 
 	dtls_session->cipher = (SSL_CIPHER *)cipher;
 	dtls_session->cipher_id = cipher->id;
@@ -275,44 +313,17 @@ static unsigned int psk_callback(SSL *ssl, const char *hint, char *identity,
 	return PSK_KEY_SIZE;
 }
 
-static int pskident_add(SSL *s, unsigned int ext_type, const unsigned char **out, size_t *outlen,
-			int *al, void *add_arg)
+#endif
+
+#if OPENSSL_VERSION_NUMBER < 0x10002000L
+static const SSL_CIPHER *SSL_CIPHER_find(SSL *ssl, const unsigned char *ptr)
 {
-	struct openconnect_info *vpninfo = add_arg;
-	unsigned char *buf;
-
-	buf = malloc(vpninfo->dtls_app_id_size + 1);
-	if (!buf) {
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("Failed to create app-identity extension for OpenSSL\n"));
-		return 0;
-	}
-
-	buf[0] = vpninfo->dtls_app_id_size;
-	memcpy(&buf[1], vpninfo->dtls_app_id, vpninfo->dtls_app_id_size);
-
-	*out = buf;
-	*outlen = vpninfo->dtls_app_id_size + 1;
-
-	return 1;
+    return ssl->method->get_cipher_by_char(ptr);
 }
-
-static void pskident_free(SSL *s, unsigned int ext_type, const unsigned char *out, void *add_arg)
-{
-	free((void *)out);
-}
-
-static int pskident_parse(SSL *s, unsigned int ext_type, const unsigned char *in, size_t inlen,
-			  int *al, void *parse_arg)
-{
-	return 1;
-}
-
 #endif
 
 int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 {
-	STACK_OF(SSL_CIPHER) *ciphers;
 	method_const SSL_METHOD *dtls_method;
 	SSL_SESSION *dtls_session;
 	SSL *dtls_ssl;
@@ -321,7 +332,10 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 	const char *cipher = vpninfo->dtls_cipher;
 
 #ifdef HAVE_DTLS12
-	if (!strcmp(cipher, "OC-DTLS1_2-AES128-GCM")) {
+	/* These things should never happen unless they're supported */
+	if (vpninfo->cisco_dtls12) {
+		dtlsver = DTLS1_2_VERSION;
+	} else if (!strcmp(cipher, "OC-DTLS1_2-AES128-GCM")) {
 		dtlsver = DTLS1_2_VERSION;
 		cipher = "AES128-GCM-SHA256";
 	} else if (!strcmp(cipher, "OC-DTLS1_2-AES256-GCM")) {
@@ -336,16 +350,16 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 
 	if (!vpninfo->dtls_ctx) {
 #ifdef HAVE_DTLS12
+		/* If we can use SSL_CTX_set_min_proto_version, do so. */
 		dtls_method = DTLS_client_method();
 #endif
-#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+#ifndef HAVE_SSL_CTX_PROTOVER
+		/* If !HAVE_DTLS12, dtlsver *MUST* be DTLS1_BAD_VER because it's set
+		 * at the top of the function and nothing can change it. */
 		if (dtlsver == DTLS1_BAD_VER)
 			dtls_method = DTLSv1_client_method();
-#ifdef HAVE_DTLS12
-		else if (dtlsver == DTLS1_2_VERSION)
-			dtls_method = DTLSv1_2_client_method();
 #endif
-#endif
+
 		vpninfo->dtls_ctx = SSL_CTX_new(dtls_method);
 		if (!vpninfo->dtls_ctx) {
 			vpn_progress(vpninfo, PRG_ERR,
@@ -354,24 +368,26 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 			vpninfo->dtls_attempt_period = 0;
 			return -EINVAL;
 		}
-		if (dtlsver) {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
-			if (dtlsver == DTLS1_BAD_VER)
-				SSL_CTX_set_options(vpninfo->dtls_ctx, SSL_OP_CISCO_ANYCONNECT);
-#else
-			if (!SSL_CTX_set_min_proto_version(vpninfo->dtls_ctx, dtlsver) ||
-			    !SSL_CTX_set_max_proto_version(vpninfo->dtls_ctx, dtlsver)) {
-				vpn_progress(vpninfo, PRG_ERR,
-					     _("Set DTLS CTX version failed\n"));
-				openconnect_report_ssl_errors(vpninfo);
-				SSL_CTX_free(vpninfo->dtls_ctx);
-				vpninfo->dtls_ctx = NULL;
-				vpninfo->dtls_attempt_period = 0;
-				return -EINVAL;
-			}
+#ifdef HAVE_SSL_CTX_PROTOVER
+		if (dtlsver &&
+		    (!SSL_CTX_set_min_proto_version(vpninfo->dtls_ctx, dtlsver) ||
+		     !SSL_CTX_set_max_proto_version(vpninfo->dtls_ctx, dtlsver))) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("Set DTLS CTX version failed\n"));
+			openconnect_report_ssl_errors(vpninfo);
+			SSL_CTX_free(vpninfo->dtls_ctx);
+			vpninfo->dtls_ctx = NULL;
+			vpninfo->dtls_attempt_period = 0;
+			return -EINVAL;
+		}
+#else /* !HAVE_SSL_CTX_PROTOVER */
+		/* If we used the legacy version-specific methods, we need the special
+		 * way to make TLSv1_client_method() do DTLS1_BAD_VER. */
+		if (dtlsver == DTLS1_BAD_VER)
+			SSL_CTX_set_options(vpninfo->dtls_ctx, SSL_OP_CISCO_ANYCONNECT);
 #endif
 #if defined (HAVE_DTLS12) && !defined(OPENSSL_NO_PSK)
-		} else {
+		if (!dtlsver) {
 			SSL_CTX_set_psk_client_callback(vpninfo->dtls_ctx, psk_callback);
 			/* For PSK we override the DTLS master secret with one derived
 			 * from the HTTPS session. */
@@ -386,13 +402,48 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 				vpninfo->dtls_attempt_period = 0;
 				return -EINVAL;
 			}
-			SSL_CTX_add_client_custom_ext(vpninfo->dtls_ctx, DTLS_APP_ID_EXT,
-						      pskident_add, pskident_free, vpninfo,
-						      pskident_parse, vpninfo);
 			/* For SSL_CTX_set_cipher_list() */
 			cipher = "PSK";
-#endif
 		}
+#endif /* OPENSSL_NO_PSK */
+#ifdef SSL_OP_NO_ENCRYPT_THEN_MAC
+		/*
+		 * I'm fairly sure I wasn't lying when I said I had tested
+		 * https://github.com/openssl/openssl/commit/e23d5071ec4c7aa6bb2b
+		 * against GnuTLS both with and without EtM in 2016.
+		 *
+		 * Nevertheless, in 2019 it seems to be failing to negotiate
+		 * at least for DTLS1_BAD_VER against ocserv with GnuTLS 3.6.7:
+		 * https://gitlab.com/gnutls/gnutls/issues/139 — I think because
+		 * GnuTLS isn't actually doing EtM after negotiating it (like
+		 * OpenSSL 1.1.0 used to).
+		 *
+		 * Just turn it off. Real Cisco servers don't do it for
+		 * DTLS1_BAD_VER, and against ocserv (and newer Cisco) we should
+		 * be using DTLSv1.2 with AEAD ciphersuites anyway so EtM is
+		 * irrelevant.
+		 */
+		SSL_CTX_set_options(vpninfo->dtls_ctx, SSL_OP_NO_ENCRYPT_THEN_MAC);
+#endif
+#ifdef SSL_OP_NO_EXTENDED_MASTER_SECRET
+		/* RFC7627 says:
+		 *
+		 *   If the original session did not use the "extended_master_secret"
+		 *   extension but the new ClientHello contains the extension, then the
+		 *   server MUST NOT perform the abbreviated handshake.  Instead, it
+		 *   SHOULD continue with a full handshake (as described in
+		 *   Section 5.2) to negotiate a new session.
+		 *
+		 * Now that would be distinctly suboptimal, since we have no way to do
+		 * a full handshake (we even explicitly protect against it, in case a
+		 * MITM server attempts to hijack our deliberately-resumed session).
+		 *
+		 * So where OpenSSL provides the choice, tell it not to use extms on
+		 * resumed sessions.
+		 */
+		if (dtlsver)
+			SSL_CTX_set_options(vpninfo->dtls_ctx, SSL_OP_NO_EXTENDED_MASTER_SECRET);
+#endif
 		/* If we don't readahead, then we do short reads and throw
 		   away the tail of data packets. */
 		SSL_CTX_set_read_ahead(vpninfo->dtls_ctx, 1);
@@ -411,10 +462,22 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 	SSL_set_connect_state(dtls_ssl);
 	SSL_set_app_data(dtls_ssl, vpninfo);
 
+
 	if (dtlsver) {
-		ciphers = SSL_get_ciphers(dtls_ssl);
-		if (dtlsver != 0 && sk_SSL_CIPHER_num(ciphers) != 1) {
-			vpn_progress(vpninfo, PRG_ERR, _("Not precisely one DTLS cipher\n"));
+		STACK_OF(SSL_CIPHER) *ciphers = SSL_get_ciphers(dtls_ssl);
+		const SSL_CIPHER *ssl_ciph = NULL;
+		int i;
+
+		for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
+			ssl_ciph = sk_SSL_CIPHER_value(ciphers, i);
+			/* For PSK-NEGOTIATE just use the first one we find */
+			if (!dtlsver || !strcmp(SSL_CIPHER_get_name(ssl_ciph), cipher))
+				break;
+		}
+
+		if (i == sk_SSL_CIPHER_num(ciphers)) {
+			vpn_progress(vpninfo, PRG_ERR, _("DTLS cipher '%s' not found\n"),
+				     cipher);
 			SSL_CTX_free(vpninfo->dtls_ctx);
 			SSL_free(dtls_ssl);
 			vpninfo->dtls_ctx = NULL;
@@ -423,8 +486,7 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 		}
 
 		/* We're going to "resume" a session which never existed. Fake it... */
-		dtls_session = generate_dtls_session(vpninfo, dtlsver,
-						     sk_SSL_CIPHER_value(ciphers, 0));
+		dtls_session = generate_dtls_session(vpninfo, dtlsver, ssl_ciph, 0);
 		if (!dtls_session) {
 			SSL_CTX_free(vpninfo->dtls_ctx);
 			SSL_free(dtls_ssl);
@@ -433,7 +495,6 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 			return -EINVAL;
 		}
 
-		/* Add the generated session to the SSL */
 		if (!SSL_set_session(dtls_ssl, dtls_session)) {
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("SSL_set_session() failed with old protocol version 0x%x\n"
@@ -448,10 +509,39 @@ int start_dtls_handshake(struct openconnect_info *vpninfo, int dtls_fd)
 			SSL_SESSION_free(dtls_session);
 			return -EINVAL;
 		}
+		/* We don't need our own refcount on it any more */
+		SSL_SESSION_free(dtls_session);
 
+	} else if (vpninfo->dtls_app_id_size > 0) {
+		const uint8_t cs[2] = {0x00, 0x2F}; /* RSA-AES-128 */
+		/* we generate a session with a random key which cannot be resumed;
+		 * we want to set the client identifier we received from the server
+		 * as a session ID. */
+		dtls_session = generate_dtls_session(vpninfo, DTLS1_VERSION,
+						     SSL_CIPHER_find(dtls_ssl, cs),
+						     1);
+		if (!dtls_session) {
+			SSL_CTX_free(vpninfo->dtls_ctx);
+			SSL_free(dtls_ssl);
+			vpninfo->dtls_ctx = NULL;
+			vpninfo->dtls_attempt_period = 0;
+			return -EINVAL;
+		}
+	
+		if (!SSL_set_session(dtls_ssl, dtls_session)) {
+			vpn_progress(vpninfo, PRG_ERR,
+				     _("SSL_set_session() failed\n"));
+			SSL_CTX_free(vpninfo->dtls_ctx);
+			SSL_free(dtls_ssl);
+			vpninfo->dtls_ctx = NULL;
+			vpninfo->dtls_attempt_period = 0;
+			SSL_SESSION_free(dtls_session);
+			return -EINVAL;
+		}
 		/* We don't need our own refcount on it any more */
 		SSL_SESSION_free(dtls_session);
 	}
+
 
 	dtls_bio = BIO_new_socket(dtls_fd, BIO_NOCLOSE);
 	/* Set non-blocking */
@@ -474,7 +564,7 @@ int dtls_try_handshake(struct openconnect_info *vpninfo)
 			/* For PSK-NEGOTIATE, we have to determine the tunnel MTU
 			 * for ourselves based on the base MTU */
 			int data_mtu = vpninfo->cstp_basemtu;
-			if (vpninfo->peer_addr->sa_family == IPPROTO_IPV6)
+			if (vpninfo->peer_addr->sa_family == AF_INET6)
 				data_mtu -= 40; /* IPv6 header */
 			else
 				data_mtu -= 20; /* Legacy IP header */
@@ -630,15 +720,66 @@ void dtls_ssl_free(struct openconnect_info *vpninfo)
 	SSL_free(vpninfo->dtls_ssl);
 }
 
-void append_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *buf)
+#if OPENSSL_VERSION_NUMBER < 0x10100000L || defined(LIBRESSL_VERSION_NUMBER)
+void gather_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *buf,
+			 struct oc_text_buf *buf12)
 {
 #ifdef HAVE_DTLS12
 #ifndef OPENSSL_NO_PSK
 	buf_append(buf, "PSK-NEGOTIATE:");
 #endif
 	buf_append(buf, "OC-DTLS1_2-AES256-GCM:OC-DTLS1_2-AES128-GCM:");
+	buf_append(buf12, "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256:AES128-GCM-SHA256:AES256-GCM-SHA384\r\n");
 #endif
 	buf_append(buf, "DHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:");
 	buf_append(buf, "AES256-SHA:AES128-SHA:DES-CBC3-SHA:DES-CBC-SHA");
 }
+#else
+void gather_dtls_ciphers(struct openconnect_info *vpninfo, struct oc_text_buf *buf,
+			 struct oc_text_buf *buf12)
+{
+	method_const SSL_METHOD *dtls_method;
+	SSL_CTX *ctx;
+	SSL *ssl;
+	STACK_OF(SSL_CIPHER) *ciphers;
+	int i;
 
+	dtls_method = DTLS_client_method();
+	ctx = SSL_CTX_new(dtls_method);
+	if (!ctx)
+		return;
+	ssl = SSL_new(ctx);
+	if (!ssl) {
+		SSL_CTX_free(ctx);
+		return;
+	}
+
+	ciphers = SSL_get1_supported_ciphers(ssl);
+	for (i = 0; i < sk_SSL_CIPHER_num(ciphers); i++) {
+		const SSL_CIPHER *ciph = sk_SSL_CIPHER_value(ciphers, i);
+		const char *name = SSL_CIPHER_get_name(ciph);
+		const char *vers = SSL_CIPHER_get_version(ciph);
+
+		if (!strcmp(vers, "SSLv3") || !strcmp(vers, "TLSv1.0") ||
+		    !strcmp(vers, "TLSv1/SSLv3")) {
+			buf_append(buf, "%s%s",
+				   (buf_error(buf) || !buf->pos) ? "" : ":",
+				   name);
+		} else if (!strcmp(vers, "TLSv1.2")) {
+			buf_append(buf12, "%s%s:",
+				   (buf_error(buf12) || !buf12->pos) ? "" : ":",
+				   name);
+		}
+	}
+	sk_SSL_CIPHER_free(ciphers);
+	SSL_free(ssl);
+	SSL_CTX_free(ctx);
+
+	/* All DTLSv1 suites are also supported in DTLSv1.2 */
+	if (!buf_error(buf))
+		buf_append(buf12, ":%s", buf->data);
+#ifndef OPENSSL_NO_PSK
+	buf_append(buf, ":PSK-NEGOTIATE");
+#endif
+}
+#endif

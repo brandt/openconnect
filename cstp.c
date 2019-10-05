@@ -179,7 +179,7 @@ static void append_mobile_headers(struct openconnect_info *vpninfo, struct oc_te
 {
 	if (vpninfo->mobile_platform_version) {
 		buf_append(buf, "X-AnyConnect-Identifier-ClientVersion: %s\r\n",
-			   openconnect_version_str);
+			   vpninfo->version_string ? : openconnect_version_str);
 		buf_append(buf, "X-AnyConnect-Identifier-Platform: %s\r\n",
 			   vpninfo->platname);
 		buf_append(buf, "X-AnyConnect-Identifier-PlatformVersion: %s\r\n",
@@ -274,19 +274,34 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			buf_append(reqbuf, "%02X", vpninfo->dtls_secret[i]);
 			dtls_secret_set |= vpninfo->dtls_secret[i];
 		}
+		buf_append(reqbuf, "\r\n");
+
 		if (!dtls_secret_set) {
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("CRITICAL ERROR: DTLS master secret is uninitialised. Please report this.\n"));
 			buf_free(reqbuf);
 			return -EINVAL;
 		}
-		buf_append(reqbuf, "\r\nX-DTLS-CipherSuite: ");
-		if (vpninfo->dtls_ciphers)
-			buf_append(reqbuf, "%s", vpninfo->dtls_ciphers);
-		else
-			append_dtls_ciphers(vpninfo, reqbuf);
-		buf_append(reqbuf, "\r\n");
 
+
+		if (vpninfo->dtls_ciphers || vpninfo->dtls12_ciphers) {
+			if (vpninfo->dtls_ciphers)
+				buf_append(reqbuf, "X-DTLS-CipherSuite: %s\r\n", vpninfo->dtls_ciphers);
+			if (vpninfo->dtls12_ciphers)
+				buf_append(reqbuf, "X-DTLS12-CipherSuite: %s\r\n", vpninfo->dtls12_ciphers);
+		} else {
+			struct oc_text_buf *dtls_cl, *dtls12_cl;
+
+			dtls_cl = buf_alloc();
+			dtls12_cl = buf_alloc();
+			gather_dtls_ciphers(vpninfo, dtls_cl, dtls12_cl);
+			if (!buf_error(dtls_cl) && dtls_cl->pos)
+				buf_append(reqbuf, "X-DTLS-CipherSuite: %s\r\n", dtls_cl->data);
+			if (!buf_error(dtls12_cl) && dtls12_cl->pos)
+				buf_append(reqbuf, "X-DTLS12-CipherSuite: %s\r\n", dtls12_cl->data);
+			buf_free(dtls_cl);
+			buf_free(dtls12_cl);
+		}
 		append_compr_types(reqbuf, "DTLS", vpninfo->req_compr & ~COMPR_DEFLATE);
 	}
 #endif
@@ -372,7 +387,8 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			colon++;
 
 		if (strncmp(buf, "X-DTLS-", 7) &&
-		    strncmp(buf, "X-CSTP-", 7))
+		    strncmp(buf, "X-CSTP-", 7) &&
+		    strncmp(buf, "X-DTLS12-", 9))
 			continue;
 
 		new_option = malloc(sizeof(*new_option));
@@ -398,15 +414,16 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 		else
 			vpn_progress(vpninfo, PRG_DEBUG, "%s: %s\n", buf, colon);
 
-		if (!strncmp(buf, "X-DTLS-", 7)) {
+		if (((i = 7) && !strncmp(buf, "X-DTLS-", 7)) ||
+		    ((i = 9) && !strncmp(buf, "X-DTLS12-", 9))) {
 			*next_dtls_option = new_option;
 			next_dtls_option = &new_option->next;
 
-			if (!strcmp(buf + 7, "MTU")) {
+			if (!strcmp(buf + i, "MTU")) {
 				int dtlsmtu = atol(colon);
 				if (dtlsmtu > mtu)
 					mtu = dtlsmtu;
-			} else if (!strcmp(buf + 7, "Session-ID")) {
+			} else if (!strcmp(buf + i, "Session-ID")) {
 				int dtls_sessid_changed = 0;
 				int vsize;
 
@@ -423,7 +440,7 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 
 				if (dtls_sessid_changed && vpninfo->dtls_state > DTLS_SLEEPING)
 					vpninfo->dtls_need_reconnect = 1;
-			} else if (!strcmp(buf + 7, "App-ID")) {
+			} else if (!strcmp(buf + i, "App-ID")) {
 				int dtls_appid_changed = 0;
 				int vsize;
 
@@ -441,7 +458,7 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 
 				if (dtls_appid_changed && vpninfo->dtls_state > DTLS_SLEEPING)
 					vpninfo->dtls_need_reconnect = 1;
-			} else if (!strcmp(buf + 7, "Content-Encoding")) {
+			} else if (!strcmp(buf + i, "Content-Encoding")) {
 				if (!strcmp(colon, "lzs"))
 					vpninfo->dtls_compr = COMPR_LZS;
 				else if (!strcmp(colon, "oc-lz4"))
@@ -452,6 +469,10 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 						     colon);
 					return -EINVAL;
 				}
+			} else if (!strcmp(buf + i, "CipherSuite")) {
+				/* Remember if it came from a 'X-DTLS12-CipherSuite:' header */
+				vpninfo->cisco_dtls12 = (i == 9);
+				vpninfo->dtls_cipher = strdup(colon);
 			}
 			continue;
 		}
@@ -462,6 +483,8 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 
 		if (!strcmp(buf + 7, "Keepalive")) {
 			vpninfo->ssl_times.keepalive = atol(colon);
+		} else if (!strcmp(buf + 7, "Idle-Timeout")) {
+			vpninfo->idle_timeout = atol(colon);
 		} else if (!strcmp(buf + 7, "DPD")) {
 			int j = atol(colon);
 			if (j && (!vpninfo->ssl_times.dpd || j < vpninfo->ssl_times.dpd))
@@ -511,7 +534,8 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 					vpninfo->ip_info.netmask6 = new_option->value;
 			} else
 				vpninfo->ip_info.netmask = new_option->value;
-		} else if (!strcmp(buf + 7, "DNS")) {
+		} else if (!strcmp(buf + 7, "DNS") ||
+			   !strcmp(buf + 7, "DNS-IP6")) {
 			int j;
 			for (j = 0; j < 3; j++) {
 				if (!vpninfo->ip_info.dns[j]) {
@@ -581,7 +605,8 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Reconnect gave different Legacy IP address (%s != %s)\n"),
 				     vpninfo->ip_info.addr, old_addr);
-			return -EINVAL;
+			/* EPERM means that the retry loop will abort and won't keep trying. */
+			return -EPERM;
 		}
 	}
 	if (old_netmask) {
@@ -589,7 +614,7 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Reconnect gave different Legacy IP netmask (%s != %s)\n"),
 				     vpninfo->ip_info.netmask, old_netmask);
-			return -EINVAL;
+			return -EPERM;
 		}
 	}
 	if (old_addr6) {
@@ -597,7 +622,7 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Reconnect gave different IPv6 address (%s != %s)\n"),
 				     vpninfo->ip_info.addr6, old_addr6);
-			return -EINVAL;
+			return -EPERM;
 		}
 	}
 	if (old_netmask6) {
@@ -605,24 +630,12 @@ static int start_cstp_connection(struct openconnect_info *vpninfo)
 			vpn_progress(vpninfo, PRG_ERR,
 				     _("Reconnect gave different IPv6 netmask (%s != %s)\n"),
 				     vpninfo->ip_info.netmask6, old_netmask6);
-			return -EINVAL;
+			return -EPERM;
 		}
 	}
 
-	while (old_dtls_opts) {
-		struct oc_vpn_option *tmp = old_dtls_opts;
-		old_dtls_opts = old_dtls_opts->next;
-		free(tmp->value);
-		free(tmp->option);
-		free(tmp);
-	}
-	while (old_cstp_opts) {
-		struct oc_vpn_option *tmp = old_cstp_opts;
-		old_cstp_opts = old_cstp_opts->next;
-		free(tmp->value);
-		free(tmp->option);
-		free(tmp);
-	}
+	free_optlist(old_dtls_opts);
+	free_optlist(old_cstp_opts);
 	vpn_progress(vpninfo, PRG_INFO, _("CSTP connected. DPD %d, Keepalive %d\n"),
 		     vpninfo->ssl_times.dpd, vpninfo->ssl_times.keepalive);
 	vpn_progress(vpninfo, PRG_DEBUG, _("CSTP Ciphersuite: %s\n"),
@@ -741,7 +754,11 @@ static int cstp_reconnect(struct openconnect_info *vpninfo)
 int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type,
 				unsigned char *buf, int len)
 {
-	struct pkt *new = malloc(sizeof(struct pkt) + vpninfo->ip_info.mtu);
+	/* Some servers send us packets that are larger than
+	   negotiated MTU after decompression. We reserve some extra
+	   space to handle that */
+	int receive_mtu = MAX(16384, vpninfo->ip_info.mtu);
+	struct pkt *new = malloc(sizeof(struct pkt) + receive_mtu);
 	const char *comprname = "";
 
 	if (!new)
@@ -758,7 +775,7 @@ int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type
 		vpninfo->inflate_strm.avail_in = len - 4;
 
 		vpninfo->inflate_strm.next_out = new->data;
-		vpninfo->inflate_strm.avail_out = vpninfo->ip_info.mtu;
+		vpninfo->inflate_strm.avail_out = receive_mtu;
 		vpninfo->inflate_strm.total_out = 0;
 
 		if (inflate(&vpninfo->inflate_strm, Z_SYNC_FLUSH)) {
@@ -780,7 +797,7 @@ int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type
 	} else if (compr_type == COMPR_LZS) {
 		comprname = "LZS";
 
-		new->len = lzs_decompress(new->data, vpninfo->ip_info.mtu, buf, len);
+		new->len = lzs_decompress(new->data, receive_mtu, buf, len);
 		if (new->len < 0) {
 			len = new->len;
 			if (len == 0)
@@ -793,7 +810,7 @@ int decompress_and_queue_packet(struct openconnect_info *vpninfo, int compr_type
 #ifdef HAVE_LZ4
 	} else if (compr_type == COMPR_LZ4) {
 		comprname = "LZ4";
-		new->len = LZ4_decompress_safe((void *)buf, (void *)new->data, len, vpninfo->ip_info.mtu);
+		new->len = LZ4_decompress_safe((void *)buf, (void *)new->data, len, receive_mtu);
 		if (new->len <= 0) {
 			len = new->len;
 			if (len == 0)
@@ -879,7 +896,7 @@ int compress_packet(struct openconnect_info *vpninfo, int compr_type, struct pkt
 	return 0;
 }
 
-int cstp_mainloop(struct openconnect_info *vpninfo, int *timeout)
+int cstp_mainloop(struct openconnect_info *vpninfo, int *timeout, int readable)
 {
 	int ret;
 	int work_done = 0;
@@ -893,19 +910,22 @@ int cstp_mainloop(struct openconnect_info *vpninfo, int *timeout)
 	   we should probably remove POLLIN from the events we're looking for,
 	   and add POLLOUT. As it is, though, it'll just chew CPU time in that
 	   fairly unlikely situation, until the write backlog clears. */
-	while (1) {
-		int len = MAX(16384, vpninfo->deflate_pkt_size ? : vpninfo->ip_info.mtu);
-		int payload_len;
+	while (readable) {
+		/* Some servers send us packets that are larger than
+		   negotiated MTU. We reserve some extra space to
+		   handle that */
+		int receive_mtu = MAX(16384, vpninfo->deflate_pkt_size ? : vpninfo->ip_info.mtu);
+		int len, payload_len;
 
 		if (!vpninfo->cstp_pkt) {
-			vpninfo->cstp_pkt = malloc(sizeof(struct pkt) + len);
+			vpninfo->cstp_pkt = malloc(sizeof(struct pkt) + receive_mtu);
 			if (!vpninfo->cstp_pkt) {
 				vpn_progress(vpninfo, PRG_ERR, _("Allocation failed\n"));
 				break;
 			}
 		}
 
-		len = ssl_nonblock_read(vpninfo, vpninfo->cstp_pkt->cstp.hdr, len + 8);
+		len = ssl_nonblock_read(vpninfo, vpninfo->cstp_pkt->cstp.hdr, receive_mtu + 8);
 		if (!len)
 			break;
 		if (len < 0)

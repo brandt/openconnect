@@ -10,20 +10,53 @@
 
 <h1>Trusted Platform Module (TPM) support</h1>
 
-<p>OpenConnect supports the use of private keys secured or "wrapped" by a TPM.
-These keys appear in the form of a PEM file marked with the tag:
+<p>OpenConnect supports the use of private keys secured or "wrapped"
+by a TPM. Instead of being stored inside the trusted hardware as with
+typical PKCS#11 keys, the key is encrypted by the TPM and handed back
+to the user to be saved in a PEM file. Only the same TPM can decrypt
+the file, and use the private key.</p>
+
+<p>Use of TPM-wrapped keys is intended to be entirely
+transparent. OpenConnect will automatically use the TPM when presented
+with an appropriate PEM file with a TPM-wrapped key.</p>
+
+<p>When OpenConnect is built with OpenSSL, the appropriate TPM ENGINE
+must be installed correctly on the system, and OpenConnect will load
+and use it automatically when appropriate.
+</p>
+<p>For GnuTLS builds of OpenConnect, it needs to have been built with
+the appropriate TPM (v1 or v2) support built-in.</p>
+
+<h2>TPM v1</h2>
+
+<p>TPM v1 wrapped keys appear in the form of a PEM file marked with the tag:
 <pre>-----BEGIN TSS KEY BLOB-----</pre>
 These files can be created by the <tt>create_tpm_key</tt> tool which is
 part of the
-<a href="https://sourceforge.net/p/trousers/openssl_tpm_engine">OpenSSL
+<a href="https://github.com/mgerstner/openssl_tpm_engine">OpenSSL
 TPM ENGINE</a> or the <a href="https://www.gnutls.org/manual/html_node/tpmtool-Invocation.html">tpmtool</a> which is part of the GnuTLS distribution.</p>
 
-<p>Use of TPM-wrapped keys is entirely transparent with GnuTLS. If built with
-TPM support, OpenConnect will automatically use the TPM when presented with
-an approprate PEM file with a TPM-wrapped key.</p>
-<p>For OpenSSL, the TPM ENGINE must be installed correctly on the system,
-and OpenConnect will load and use it automatically when appropriate.
-</p>
+<h2>TPM v2</h2>
+
+<p>As from the 8.0 release, OpenConnect supports TPM v2 wrapped keys.
+These have the PEM tag:
+<pre>-----BEGIN TSS2 PRIVATE KEY-----</pre>
+
+There are two ENGINE implementations for TPM v2 with OpenSSL,
+based on different TSS libraries.</p>
+
+<p><a href="https://git.kernel.org/pub/scm/linux/kernel/git/jejb/openssl_tpm2_engine.git/"><tt>openssl_tpm2_engine</tt></a> is based on <a href="http://sourceforge.net/projects/ibmtpm20tss/">IBM's TPM 2.0 TSS</a>, while
+<a href="https://github.com/tpm2-software/tpm2-tss-engine"><tt>tss2-tss-engine</tt></a> uses the
+<a href="https://github.com/tpm2-software/tpm2-tss">Intel/TCG stack</a>. OpenConnect can use
+either ENGINE.</p>
+
+
+<p>The GnuTLS build of OpenConnect can use either TSS library.</p>
+
+<p>Older keys from <tt>openssl_tpm2_engine</tt> may have the tag:
+<pre>-----BEGIN TSS2 KEY BLOB-----</pre></p>
+
+This format is also supported by the GnuTLS builds of OpenConnect.
 
 <INCLUDE file="inc/footer.tmpl" />
 </PAGE>

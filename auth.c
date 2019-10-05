@@ -417,6 +417,12 @@ static int parse_auth_node(struct openconnect_info *vpninfo, xmlNode *xml_node,
 		} else if (!vpninfo->csd_scriptname && xmlnode_is_named(xml_node, "csd")) {
 			xmlnode_get_prop(xml_node, "token", &vpninfo->csd_token);
 			xmlnode_get_prop(xml_node, "ticket", &vpninfo->csd_ticket);
+		} else if (xmlnode_is_named(xml_node, "authentication-complete")) {
+			/* Ick. Since struct oc_auth_form is public there's no
+			 * simple way to add a flag to it. So let's abuse the
+			 * auth_id string instead. */
+			free(form->auth_id);
+			form->auth_id = strdup("openconnect_authentication_complete");
 		}
 		/* For Windows, vpninfo->csd_xmltag will be "csd" and there are *two* <csd>
 		   nodes; one with token/ticket and one with the URLs. Process them both
@@ -648,6 +654,8 @@ static int handle_auth_form(struct openconnect_info *vpninfo, struct oc_auth_for
 			vpn_progress(vpninfo, PRG_INFO, "%s\n", form->message);
 		if (form->error)
 			vpn_progress(vpninfo, PRG_ERR, "%s\n", form->error);
+		if (!strcmp(form->auth_id, "openconnect_authentication_complete"))
+			goto justpost;
 		return -EPERM;
 	}
 
@@ -662,7 +670,7 @@ static int handle_auth_form(struct openconnect_info *vpninfo, struct oc_auth_for
 		vpninfo->token_bypassed = 1;
 		return ret;
 	}
-
+ justpost:
 	ret = vpninfo->xmlpost ?
 	      xmlpost_append_form_opts(vpninfo, form, request_body) :
 	      append_form_opts(vpninfo, form, request_body);
@@ -720,7 +728,8 @@ static xmlDocPtr xmlpost_new_query(struct openconnect_info *vpninfo, const char 
 		goto bad;
 	xmlDocSetRootElement(doc, root);
 
-	node = xmlNewTextChild(root, NULL, XCAST("version"), XCAST(openconnect_version_str));
+	node = xmlNewTextChild(root, NULL, XCAST("version"),
+			       XCAST(vpninfo->version_string ? : openconnect_version_str));
 	if (!node)
 		goto bad;
 	if (!xmlNewProp(node, XCAST("who"), XCAST("vpn")))
@@ -893,10 +902,11 @@ static int cstp_can_gen_tokencode(struct openconnect_info *vpninfo,
 	}
 #endif
 	/* Otherwise it's an OATH token of some kind. */
-	if (strcmp(opt->name, "secondary_password"))
-		return -EINVAL;
+	if (!strcmp(opt->name, "secondary_password") ||
+        (form->auth_id && !strcmp(form->auth_id, "challenge")))
+	  return can_gen_tokencode(vpninfo, form, opt);
 
-	return can_gen_tokencode(vpninfo, form, opt);
+	return -EINVAL;
 }
 
 static int fetch_config(struct openconnect_info *vpninfo)
@@ -973,6 +983,58 @@ static int fetch_config(struct openconnect_info *vpninfo)
 	result = vpninfo->write_new_config(vpninfo->cbdata, buf->data, buf->pos);
 	buf_free(buf);
 	return result;
+}
+
+int set_csd_user(struct openconnect_info *vpninfo)
+{
+#if defined(_WIN32) || defined(__native_client__)
+	vpn_progress(vpninfo, PRG_ERR,
+		     _("Error: Running the 'Cisco Secure Desktop' trojan on this platform is not yet implemented.\n"));
+	return -EPERM;
+#else
+	setsid();
+
+	if (vpninfo->uid_csd_given && vpninfo->uid_csd != getuid()) {
+		struct passwd *pw;
+		int e;
+
+		if (setgid(vpninfo->gid_csd)) {
+			e = errno;
+			fprintf(stderr, _("Failed to set gid %ld: %s\n"),
+				(long)vpninfo->uid_csd, strerror(e));
+			return -e;
+		}
+
+		if (setgroups(1, &vpninfo->gid_csd)) {
+			e = errno;
+			fprintf(stderr, _("Failed to set groups to %ld: %s\n"),
+				(long)vpninfo->uid_csd, strerror(e));
+			return -e;
+		}
+
+		if (setuid(vpninfo->uid_csd)) {
+			e = errno;
+			fprintf(stderr, _("Failed to set uid %ld: %s\n"),
+				(long)vpninfo->uid_csd, strerror(e));
+			return -e;
+		}
+
+		if (!(pw = getpwuid(vpninfo->uid_csd))) {
+			e = errno;
+			fprintf(stderr, _("Invalid user uid=%ld: %s\n"),
+				(long)vpninfo->uid_csd, strerror(e));
+			return -e;
+		}
+		setenv("HOME", pw->pw_dir, 1);
+		if (chdir(pw->pw_dir)) {
+			e = errno;
+			fprintf(stderr, _("Failed to change to CSD home directory '%s': %s\n"),
+				pw->pw_dir, strerror(e));
+			return -e;
+		}
+	}
+	return 0;
+#endif
 }
 
 static int run_csd_script(struct openconnect_info *vpninfo, char *buf, int buflen)
@@ -1073,47 +1135,8 @@ static int run_csd_script(struct openconnect_info *vpninfo, char *buf, int bufle
 			char *csd_argv[32];
 			int i = 0;
 
-			setsid();
-
-			if (vpninfo->uid_csd_given && vpninfo->uid_csd != getuid()) {
-				struct passwd *pw;
-				int e;
-
-				if (setgid(vpninfo->gid_csd)) {
-					e = errno;
-					fprintf(stderr, _("Failed to set gid %ld: %s\n"),
-						(long)vpninfo->uid_csd, strerror(e));
-					exit(1);
-				}
-
-				if (setgroups(1, &vpninfo->gid_csd)) {
-					e = errno;
-					fprintf(stderr, _("Failed to set groups to %ld: %s\n"),
-						(long)vpninfo->uid_csd, strerror(e));
-					exit(1);
-				}
-
-				if (setuid(vpninfo->uid_csd)) {
-					e = errno;
-					fprintf(stderr, _("Failed to set uid %ld: %s\n"),
-						(long)vpninfo->uid_csd, strerror(e));
-					exit(1);
-				}
-
-				if (!(pw = getpwuid(vpninfo->uid_csd))) {
-					e = errno;
-					fprintf(stderr, _("Invalid user uid=%ld: %s\n"),
-						(long)vpninfo->uid_csd, strerror(e));
-					exit(1);
-				}
-				setenv("HOME", pw->pw_dir, 1);
-				if (chdir(pw->pw_dir)) {
-					e = errno;
-					fprintf(stderr, _("Failed to change to CSD home directory '%s': %s\n"),
-						pw->pw_dir, strerror(e));
-					exit(1);
-				}
-			}
+			if (set_csd_user(vpninfo) < 0)
+				exit(1);
 			if (getuid() == 0 && !vpninfo->csd_wrapper) {
 				fprintf(stderr, _("Warning: you are running insecure "
 						  "CSD code with root privileges\n"
@@ -1142,16 +1165,19 @@ static int run_csd_script(struct openconnect_info *vpninfo, char *buf, int bufle
 			if (asprintf(&csd_argv[i++], "\"%s:%s\"", scertbuf, ccertbuf) == -1)
 				goto out;
 
+
 			csd_argv[i++] = (char *)"-url";
-			if (asprintf(&csd_argv[i++], "\"https://%s%s\"", vpninfo->hostname, vpninfo->csd_starturl) == -1)
+			if (asprintf(&csd_argv[i++], "\"https://%s%s\"", openconnect_get_hostname(vpninfo), vpninfo->csd_starturl) == -1)
 				goto out;
 
 			csd_argv[i++] = (char *)"-langselen";
 			csd_argv[i++] = NULL;
 
+			if (setenv("CSD_SHA256", openconnect_get_peer_cert_hash(vpninfo)+11, 1))  /* remove initial 'pin-sha256:' */
+				goto out;
 			if (setenv("CSD_TOKEN", vpninfo->csd_token, 1))
 				goto out;
-			if (setenv("CSD_HOSTNAME", vpninfo->hostname, 1))
+			if (setenv("CSD_HOSTNAME", openconnect_get_hostname(vpninfo), 1))
 				goto out;
 
 			apply_script_env(vpninfo->csd_env);
@@ -1216,15 +1242,6 @@ int cstp_obtain_cookie(struct openconnect_info *vpninfo)
 	int orig_port = 0;
 	int cert_rq, cert_sent = !vpninfo->cert;
 	int newgroup_attempts = 5;
-
-#ifdef HAVE_LIBSTOKEN
-	/* Step 1: Unlock software token (if applicable) */
-	if (vpninfo->token_mode == OC_TOKEN_MODE_STOKEN) {
-		result = prepare_stoken(vpninfo);
-		if (result)
-			goto out;
-	}
-#endif
 
 	if (!vpninfo->xmlpost)
 		goto no_xmlpost;

@@ -38,6 +38,10 @@
 #include "gnutls.h"
 #endif
 
+#if defined(OPENCONNECT_OPENSSL)
+#include <openssl/bio.h>
+#endif
+
 struct openconnect_info *openconnect_vpninfo_new(const char *useragent,
 						 openconnect_validate_peer_cert_vfn validate_peer_cert,
 						 openconnect_write_new_config_vfn write_new_config,
@@ -109,11 +113,15 @@ err:
 const struct vpn_proto openconnect_protos[] = {
 	{
 		.name = "anyconnect",
+		.pretty_name = N_("Cisco AnyConnect or openconnect"),
+		.description = N_("Compatible with Cisco AnyConnect SSL VPN, as well as ocserv"),
+		.flags = OC_PROTO_PROXY | OC_PROTO_CSD | OC_PROTO_AUTH_CERT | OC_PROTO_AUTH_OTP | OC_PROTO_AUTH_STOKEN,
 		.vpn_close_session = cstp_bye,
 		.tcp_connect = cstp_connect,
 		.tcp_mainloop = cstp_mainloop,
 		.add_http_headers = cstp_common_headers,
 		.obtain_cookie = cstp_obtain_cookie,
+		.udp_protocol = "DTLS",
 #ifdef HAVE_DTLS
 		.udp_setup = dtls_setup,
 		.udp_mainloop = dtls_mainloop,
@@ -122,20 +130,92 @@ const struct vpn_proto openconnect_protos[] = {
 #endif
 	}, {
 		.name = "nc",
-		.vpn_close_session = NULL,
+		.pretty_name = N_("Juniper Network Connect"),
+		.description = N_("Compatible with Juniper Network Connect"),
+		.flags = OC_PROTO_PROXY | OC_PROTO_CSD | OC_PROTO_AUTH_CERT | OC_PROTO_AUTH_OTP,
+		.vpn_close_session = oncp_bye,
 		.tcp_connect = oncp_connect,
 		.tcp_mainloop = oncp_mainloop,
 		.add_http_headers = oncp_common_headers,
 		.obtain_cookie = oncp_obtain_cookie,
+		.udp_protocol = "ESP",
+#ifdef HAVE_ESP
+		.udp_setup = esp_setup,
+		.udp_mainloop = esp_mainloop,
+		.udp_close = oncp_esp_close,
+		.udp_shutdown = esp_shutdown,
+		.udp_send_probes = oncp_esp_send_probes,
+		.udp_catch_probe = oncp_esp_catch_probe,
+#endif
+	}, {
+		.name = "gp",
+		.pretty_name = N_("Palo Alto Networks GlobalProtect"),
+		.description = N_("Compatible with Palo Alto Networks (PAN) GlobalProtect SSL VPN"),
+		.flags = OC_PROTO_PROXY | OC_PROTO_CSD | OC_PROTO_AUTH_CERT | OC_PROTO_AUTH_OTP | OC_PROTO_AUTH_STOKEN,
+		.vpn_close_session = gpst_bye,
+		.tcp_connect = gpst_setup,
+		.tcp_mainloop = gpst_mainloop,
+		.add_http_headers = gpst_common_headers,
+		.obtain_cookie = gpst_obtain_cookie,
+		.udp_protocol = "ESP",
 #ifdef HAVE_ESP
 		.udp_setup = esp_setup,
 		.udp_mainloop = esp_mainloop,
 		.udp_close = esp_close,
 		.udp_shutdown = esp_shutdown,
+		.udp_send_probes = gpst_esp_send_probes,
+		.udp_catch_probe = gpst_esp_catch_probe,
+#endif
+	}, {
+		.name = "pulse",
+		.pretty_name = N_("Pulse Connect Secure"),
+		.description = N_("Compatible with Pulse Connect Secure SSL VPN"),
+		.flags = OC_PROTO_PROXY,
+		.vpn_close_session = pulse_bye,
+		.tcp_connect = pulse_connect,
+		.tcp_mainloop = pulse_mainloop,
+		.add_http_headers = http_common_headers,
+		.obtain_cookie = pulse_obtain_cookie,
+		.udp_protocol = "ESP",
+#ifdef HAVE_ESP
+		.udp_setup = esp_setup,
+		.udp_mainloop = esp_mainloop,
+		.udp_close = esp_close,
+		.udp_shutdown = esp_shutdown,
+		.udp_send_probes = oncp_esp_send_probes,
+		.udp_catch_probe = oncp_esp_catch_probe,
 #endif
 	},
 	{ /* NULL */ }
 };
+
+int openconnect_get_supported_protocols(struct oc_vpn_proto **protos)
+{
+	struct oc_vpn_proto *pr;
+	const struct vpn_proto *p;
+
+	*protos = pr = calloc(sizeof(openconnect_protos)/sizeof(*openconnect_protos), sizeof(*pr));
+	if (!pr)
+		return -ENOMEM;
+
+	for (p = openconnect_protos; p->name; p++, pr++) {
+		pr->name = p->name;
+		pr->pretty_name = _(p->pretty_name);
+		pr->description = _(p->description);
+		pr->flags = p->flags;
+	}
+	return (p - openconnect_protos);
+}
+
+void openconnect_free_supported_protocols(struct oc_vpn_proto *protos)
+{
+	free((void *)protos);
+}
+
+const char *openconnect_get_protocol(struct openconnect_info *vpninfo)
+{
+	return vpninfo->proto->name;
+}
 
 int openconnect_set_protocol(struct openconnect_info *vpninfo, const char *protocol)
 {
@@ -179,6 +259,14 @@ int openconnect_setup_dtls(struct openconnect_info *vpninfo,
 
 int openconnect_obtain_cookie(struct openconnect_info *vpninfo)
 {
+#ifdef HAVE_LIBSTOKEN
+	int ret;
+	if (vpninfo->token_mode == OC_TOKEN_MODE_STOKEN) {
+		ret = prepare_stoken(vpninfo);
+		if (ret)
+			return ret;
+	}
+#endif
 	return vpninfo->proto->obtain_cookie(vpninfo);
 }
 
@@ -228,7 +316,15 @@ int openconnect_set_mobile_info(struct openconnect_info *vpninfo,
 	return 0;
 }
 
-static void free_optlist(struct oc_vpn_option *opt)
+int openconnect_set_version_string(struct openconnect_info *vpninfo,
+				   const char *version_string)
+{
+	STRDUP(vpninfo->version_string, version_string);
+
+	return 0;
+}
+
+void free_optlist(struct oc_vpn_option *opt)
 {
 	struct oc_vpn_option *next;
 
@@ -280,16 +376,21 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 	free(vpninfo->unique_hostname);
 	free(vpninfo->urlpath);
 	free(vpninfo->redirect_url);
-	free(vpninfo->cookie);
+	free_pass(&vpninfo->cookie);
 	free(vpninfo->proxy_type);
 	free(vpninfo->proxy);
 	free(vpninfo->proxy_user);
-	free(vpninfo->proxy_pass);
+	free_pass(&vpninfo->proxy_pass);
+	free_pass(&vpninfo->cert_password);
 	free(vpninfo->vpnc_script);
 	free(vpninfo->cafile);
 	free(vpninfo->ifname);
 	free(vpninfo->dtls_cipher);
-#ifdef OPENCONNECT_GNUTLS
+	free(vpninfo->peer_cert_hash);
+#if defined(OPENCONNECT_OPENSSL) && defined (HAVE_BIO_METH_FREE)
+	if (vpninfo->ttls_bio_meth)
+		BIO_meth_free(vpninfo->ttls_bio_meth);
+#elif defined(OPENCONNECT_GNUTLS)
 	gnutls_free(vpninfo->cstp_cipher); /* In OpenSSL this is const */
 #ifdef HAVE_DTLS
 	gnutls_free(vpninfo->gnutls_dtls_cipher);
@@ -340,14 +441,12 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 		free(cache);
 	}
 
-	free(vpninfo->peer_cert_sha1);
-	free(vpninfo->peer_cert_sha256);
 	free(vpninfo->localname);
 	free(vpninfo->useragent);
 	free(vpninfo->authgroup);
 #ifdef HAVE_LIBSTOKEN
 	if (vpninfo->stoken_pin)
-		free(vpninfo->stoken_pin);
+		free_pass(&vpninfo->stoken_pin);
 	if (vpninfo->stoken_ctx)
 		stoken_destroy(vpninfo->stoken_ctx);
 #endif
@@ -357,15 +456,10 @@ void openconnect_vpninfo_free(struct openconnect_info *vpninfo)
 			pskc_done(vpninfo->pskc);
 		else
 #endif /* HAVE_LIBPSKC */
-		free(vpninfo->oath_secret);
+		free_pass(&vpninfo->oath_secret);
 	}
 #ifdef HAVE_LIBPCSCLITE
-	if (vpninfo->token_mode == OC_TOKEN_MODE_YUBIOATH) {
-		SCardDisconnect(vpninfo->pcsc_card, SCARD_LEAVE_CARD);
-		SCardReleaseContext(vpninfo->pcsc_ctx);
-	}
-	memset(vpninfo->yubikey_pwhash, 0, sizeof(vpninfo->yubikey_pwhash));
-	free(vpninfo->yubikey_objname);
+	release_pcsc_ctx(vpninfo);
 #endif
 #ifdef HAVE_LIBP11
 	if (vpninfo->pkcs11_ctx) {
@@ -482,6 +576,11 @@ void openconnect_set_dpd(struct openconnect_info *vpninfo, int min_seconds)
 		vpninfo->dtls_times.dpd = vpninfo->ssl_times.dpd = min_seconds;
 	else if (min_seconds == 1)
 		vpninfo->dtls_times.dpd = vpninfo->ssl_times.dpd = 2;
+}
+
+int openconnect_get_idle_timeout(struct openconnect_info *vpninfo)
+{
+	return vpninfo->idle_timeout;
 }
 
 int openconnect_get_ip_info(struct openconnect_info *vpninfo,
@@ -601,6 +700,13 @@ void openconnect_set_cert_expiry_warning(struct openconnect_info *vpninfo,
 	vpninfo->cert_expire_warning = seconds;
 }
 
+int openconnect_set_key_password(struct openconnect_info *vpninfo, const char *pass)
+{
+	STRDUP(vpninfo->cert_password, pass);
+
+	return 0;
+}
+
 void openconnect_set_pfs(struct openconnect_info *vpninfo, unsigned val)
 {
 	vpninfo->pfs = val;
@@ -671,6 +777,24 @@ int openconnect_has_tss_blob_support(void)
 		return 1;
 	}
 #elif defined(OPENCONNECT_GNUTLS) && defined(HAVE_TROUSERS)
+	return 1;
+#endif
+	return 0;
+}
+
+int openconnect_has_tss2_blob_support(void)
+{
+#if defined(OPENCONNECT_OPENSSL) && defined(HAVE_ENGINE)
+	ENGINE *e;
+
+	ENGINE_load_builtin_engines();
+
+	e = ENGINE_by_id("tpm2");
+	if (e) {
+		ENGINE_free(e);
+		return 1;
+	}
+#elif defined(OPENCONNECT_GNUTLS) && defined(HAVE_TSS2)
 	return 1;
 #endif
 	return 0;
@@ -847,7 +971,7 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 		script_setenv_int(vpninfo, "TUNIDX", vpninfo->tun_idx);
 #endif
 	legacy_ifname = openconnect_utf8_to_legacy(vpninfo, vpninfo->ifname);
-	script_setenv(vpninfo, "TUNDEV", legacy_ifname, 0);
+	script_setenv(vpninfo, "TUNDEV", legacy_ifname, 0, 0);
 	if (legacy_ifname != vpninfo->ifname)
 		free(legacy_ifname);
 	script_config_tun(vpninfo, "connect");
@@ -858,7 +982,8 @@ int openconnect_setup_tun_device(struct openconnect_info *vpninfo,
 static const char *compr_name_map[] = {
 	[COMPR_DEFLATE] = "Deflate",
 	[COMPR_LZS] = "LZS",
-	[COMPR_LZ4] = "LZ4"
+	[COMPR_LZ4] = "LZ4",
+	[COMPR_LZO] = "LZO",
 };
 
 const char *openconnect_get_cstp_compression(struct openconnect_info * vpninfo)
@@ -940,29 +1065,29 @@ int openconnect_set_csd_environ(struct openconnect_info *vpninfo,
 int openconnect_check_peer_cert_hash(struct openconnect_info *vpninfo,
 				     const char *old_hash)
 {
-	char sha1_text[41];
-	const char *fingerprint;
+	char *fingerprint = NULL;
 	unsigned min_match_len;
 	unsigned real_min_match_len = 4;
 	unsigned old_len, fingerprint_len;
+	int ret = 0;
 
 	if (strchr(old_hash, ':')) {
 		if (strncmp(old_hash, "sha1:", 5) == 0) {
-			fingerprint = vpninfo->peer_cert_sha1;
+			fingerprint = openconnect_bin2hex("sha1:", vpninfo->peer_cert_sha1_raw, sizeof(vpninfo->peer_cert_sha1_raw));
 			min_match_len = real_min_match_len + sizeof("sha1:")-1;
 		} else if (strncmp(old_hash, "sha256:", 7) == 0) {
-			fingerprint = vpninfo->peer_cert_sha256;
+			fingerprint = openconnect_bin2hex("sha256:", vpninfo->peer_cert_sha256_raw, sizeof(vpninfo->peer_cert_sha256_raw));
 			min_match_len = real_min_match_len + sizeof("sha256:")-1;
+		} else if (strncmp(old_hash, "pin-sha256:", 11) == 0) {
+			fingerprint = openconnect_bin2base64("pin-sha256:", vpninfo->peer_cert_sha256_raw, sizeof(vpninfo->peer_cert_sha256_raw));
+			min_match_len = real_min_match_len + sizeof("pin-sha256:")-1;
 		} else {
 			vpn_progress(vpninfo, PRG_ERR, _("Unknown certificate hash: %s.\n"), old_hash);
 			return -EIO;
 		}
-
-		if (!fingerprint)
-			return -EIO;
 	} else {
 		unsigned char *cert;
-		int len, i;
+		int len;
 		unsigned char sha1_bin[SHA1_SIZE];
 
 		len = openconnect_get_peer_cert_DER(vpninfo, &cert);
@@ -972,12 +1097,12 @@ int openconnect_check_peer_cert_hash(struct openconnect_info *vpninfo,
 		if (openconnect_sha1(sha1_bin, cert, len))
 			return -EIO;
 
-		for (i = 0; i < sizeof(sha1_bin); i++)
-			sprintf(&sha1_text[i*2], "%02x", sha1_bin[i]);
-
-		fingerprint = sha1_text;
+		fingerprint = openconnect_bin2hex(NULL, sha1_bin, sizeof(sha1_bin));
 		min_match_len = real_min_match_len;
 	}
+
+	if (!fingerprint)
+		return -EIO;
 
 	old_len = strlen(old_hash);
 	fingerprint_len = strlen(fingerprint);
@@ -988,14 +1113,14 @@ int openconnect_check_peer_cert_hash(struct openconnect_info *vpninfo,
 			if (old_len < min_match_len) {
 				vpn_progress(vpninfo, PRG_ERR, _("The size of the provided fingerprint is less than the minimum required (%u).\n"), real_min_match_len);
 			}
-			return 1;
+			ret = 1;
 		}
-	} else {
-		if (strcasecmp(old_hash, fingerprint))
-			return 1;
+	} else if (strcasecmp(old_hash, fingerprint)) {
+		ret = 1;
 	}
 
-	return 0;
+	free(fingerprint);
+	return ret;
 }
 
 const char *openconnect_get_cstp_cipher(struct openconnect_info *vpninfo)
@@ -1005,7 +1130,9 @@ const char *openconnect_get_cstp_cipher(struct openconnect_info *vpninfo)
 
 const char *openconnect_get_peer_cert_hash(struct openconnect_info *vpninfo)
 {
-	return vpninfo->peer_cert_sha256;
+	if (vpninfo->peer_cert_hash == NULL)
+		vpninfo->peer_cert_hash = openconnect_bin2base64("pin-sha256:", vpninfo->peer_cert_sha256_raw, sizeof(vpninfo->peer_cert_sha256_raw));
+	return vpninfo->peer_cert_hash;
 }
 
 int openconnect_set_compression_mode(struct openconnect_info *vpninfo,
@@ -1052,9 +1179,9 @@ int process_auth_form(struct openconnect_info *vpninfo, struct oc_auth_form *for
 
 retry:
 	auth_choice = NULL;
-	if (grp && grp->nr_choices && !vpninfo->xmlpost) {
+	if (grp && grp->nr_choices) {
+		/* Set group selection from authgroup */
 		if (vpninfo->authgroup) {
-			/* For non-XML-POST, the server doesn't tell us which group is selected */
 			int i;
 			for (i = 0; i < grp->nr_choices; i++)
 				if (!strcmp(grp->choices[i]->name, vpninfo->authgroup))
@@ -1101,4 +1228,3 @@ retry:
 
 	return ret;
 }
-

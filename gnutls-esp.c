@@ -39,8 +39,8 @@ void destroy_esp_ciphers(struct esp *esp)
 	}
 }
 
-static int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp,
-			    gnutls_mac_algorithm_t macalg, gnutls_cipher_algorithm_t encalg)
+static int init_esp_cipher(struct openconnect_info *vpninfo, struct esp *esp,
+			   gnutls_mac_algorithm_t macalg, gnutls_cipher_algorithm_t encalg)
 {
 	gnutls_datum_t enc_key;
 	int err;
@@ -48,7 +48,7 @@ static int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp,
 	destroy_esp_ciphers(esp);
 
 	enc_key.size = gnutls_cipher_get_key_size(encalg);
-	enc_key.data = esp->secrets;
+	enc_key.data = esp->enc_key;
 
 	err = gnutls_cipher_init(&esp->cipher, encalg, &enc_key, NULL);
 	if (err) {
@@ -59,7 +59,7 @@ static int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp,
 	}
 
 	err = gnutls_hmac_init(&esp->hmac, macalg,
-			       esp->secrets + enc_key.size,
+			       esp->hmac_key,
 			       gnutls_hmac_get_len(macalg));
 	if (err) {
 		vpn_progress(vpninfo, PRG_ERR,
@@ -67,28 +67,20 @@ static int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp,
 			     gnutls_strerror(err));
 		destroy_esp_ciphers(esp);
 	}
-	esp->seq = 0;
-	esp->seq_backlog = 0;
 	return 0;
 }
 
-int setup_esp_keys(struct openconnect_info *vpninfo)
+int init_esp_ciphers(struct openconnect_info *vpninfo, struct esp *esp_out, struct esp *esp_in)
 {
-	struct esp *esp_in;
 	gnutls_mac_algorithm_t macalg;
 	gnutls_cipher_algorithm_t encalg;
 	int ret;
 
-	if (vpninfo->dtls_state == DTLS_DISABLED)
-		return -EOPNOTSUPP;
-	if (!vpninfo->dtls_addr)
-		return -EINVAL;
-
 	switch (vpninfo->esp_enc) {
-	case 0x02:
+	case ENC_AES_128_CBC:
 		encalg = GNUTLS_CIPHER_AES_128_CBC;
 		break;
-	case 0x05:
+	case ENC_AES_256_CBC:
 		encalg = GNUTLS_CIPHER_AES_256_CBC;
 		break;
 	default:
@@ -96,48 +88,38 @@ int setup_esp_keys(struct openconnect_info *vpninfo)
 	}
 
 	switch (vpninfo->esp_hmac) {
-	case 0x01:
+	case HMAC_MD5:
 		macalg = GNUTLS_MAC_MD5;
 		break;
-	case 0x02:
+	case HMAC_SHA1:
 		macalg = GNUTLS_MAC_SHA1;
+		break;
+	case HMAC_SHA256:
+		macalg = GNUTLS_MAC_SHA256;
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	vpninfo->old_esp_maxseq = vpninfo->esp_in[vpninfo->current_esp_in].seq + 32;
-	vpninfo->current_esp_in ^= 1;
-	esp_in = &vpninfo->esp_in[vpninfo->current_esp_in];
-
-	if ((ret = gnutls_rnd(GNUTLS_RND_NONCE, &esp_in->spi, sizeof(esp_in->spi))) ||
-	    (ret = gnutls_rnd(GNUTLS_RND_RANDOM, &esp_in->secrets, sizeof(esp_in->secrets)))) {
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("Failed to generate random keys for ESP: %s\n"),
-			     gnutls_strerror(ret));
-		return -EIO;
-	}
-
-	ret = init_esp_ciphers(vpninfo, &vpninfo->esp_out, macalg, encalg);
+	ret = init_esp_cipher(vpninfo, esp_out, macalg, encalg);
 	if (ret)
 		return ret;
 
-	ret = init_esp_ciphers(vpninfo, esp_in, macalg, encalg);
+	gnutls_cipher_set_iv(esp_out->cipher, esp_out->iv, sizeof(esp_out->iv));
+
+	ret = init_esp_cipher(vpninfo, esp_in, macalg, encalg);
 	if (ret) {
-		destroy_esp_ciphers(&vpninfo->esp_out);
+		destroy_esp_ciphers(esp_out);
 		return ret;
 	}
 
-	if (vpninfo->dtls_state == DTLS_NOSECRET)
-		vpninfo->dtls_state = DTLS_SECRET;
-	vpninfo->pkt_trailer = 16 + 20; /* 16 for pad, 20 for HMAC (of which we use 16) */
 	return 0;
 }
 
 /* pkt->len shall be the *payload* length. Omitting the header and the 12-byte HMAC */
 int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct pkt *pkt)
 {
-	unsigned char hmac_buf[20];
+	unsigned char hmac_buf[MAX_HMAC_SIZE];
 	int err;
 
 	err = gnutls_hmac(esp->hmac, &pkt->esp, sizeof(pkt->esp) + pkt->len);
@@ -148,17 +130,13 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 		return -EIO;
 	}
 	gnutls_hmac_output(esp->hmac, hmac_buf);
-	if (memcmp(hmac_buf, pkt->data + pkt->len, 12)) {
+	if (memcmp(hmac_buf, pkt->data + pkt->len, vpninfo->hmac_out_len)) {
 		vpn_progress(vpninfo, PRG_DEBUG,
 			     _("Received ESP packet with invalid HMAC\n"));
 		return -EINVAL;
 	}
 
-	/* Why in $DEITY's name would you ever *not* set this? Perhaps we
-	 * should do th check anyway, but only warn instead of discarding
-	 * the packet? */
-	if (vpninfo->esp_replay_protect &&
-	    verify_packet_seqno(vpninfo, esp, ntohl(pkt->esp.seq)))
+	if (verify_packet_seqno(vpninfo, esp, ntohl(pkt->esp.seq)))
 		return -EINVAL;
 
 	gnutls_cipher_set_iv(esp->cipher, pkt->esp.iv, sizeof(pkt->esp.iv));
@@ -174,31 +152,12 @@ int decrypt_esp_packet(struct openconnect_info *vpninfo, struct esp *esp, struct
 	return 0;
 }
 
-int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt)
+int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt, int crypt_len)
 {
-	int i, padlen;
 	const int blksize = 16;
 	int err;
 
-	/* This gets much more fun if the IV is variable-length */
-	pkt->esp.spi = vpninfo->esp_out.spi;
-	pkt->esp.seq = htonl(vpninfo->esp_out.seq++);
-	err = gnutls_rnd(GNUTLS_RND_NONCE, pkt->esp.iv, sizeof(pkt->esp.iv));
-	if (err) {
-		vpn_progress(vpninfo, PRG_ERR,
-			     _("Failed to generate ESP packet IV: %s\n"),
-			     gnutls_strerror(err));
-		return -EIO;
-	}
-
-	padlen = blksize - 1 - ((pkt->len + 1) % blksize);
-	for (i=0; i<padlen; i++)
-		pkt->data[pkt->len + i] = i + 1;
-	pkt->data[pkt->len + padlen] = padlen;
-	pkt->data[pkt->len + padlen + 1] = 0x04; /* Legacy IP */
-	
-	gnutls_cipher_set_iv(vpninfo->esp_out.cipher, pkt->esp.iv, sizeof(pkt->esp.iv));
-	err = gnutls_cipher_encrypt(vpninfo->esp_out.cipher, pkt->data, pkt->len + padlen + 2);
+	err = gnutls_cipher_encrypt(vpninfo->esp_out.cipher, pkt->data, crypt_len);
 	if (err) {
 		vpn_progress(vpninfo, PRG_ERR,
 			     _("Failed to encrypt ESP packet: %s\n"),
@@ -206,13 +165,16 @@ int encrypt_esp_packet(struct openconnect_info *vpninfo, struct pkt *pkt)
 		return -EIO;
 	}
 
-	err = gnutls_hmac(vpninfo->esp_out.hmac, &pkt->esp, sizeof(pkt->esp) + pkt->len + padlen + 2);
+	err = gnutls_hmac(vpninfo->esp_out.hmac, &pkt->esp, sizeof(pkt->esp) + crypt_len);
 	if (err) {
 		vpn_progress(vpninfo, PRG_ERR,
 			     _("Failed to calculate HMAC for ESP packet: %s\n"),
 			     gnutls_strerror(err));
 		return -EIO;
 	}
-	gnutls_hmac_output(vpninfo->esp_out.hmac, pkt->data + pkt->len + padlen + 2);
-	return sizeof(pkt->esp) + pkt->len + padlen + 2 + 12;
+	gnutls_hmac_output(vpninfo->esp_out.hmac, pkt->data + crypt_len);
+
+	memcpy(vpninfo->esp_out.iv, pkt->data + crypt_len, blksize);
+	gnutls_cipher_encrypt(vpninfo->esp_out.cipher, vpninfo->esp_out.iv, blksize);
+	return 0;
 }

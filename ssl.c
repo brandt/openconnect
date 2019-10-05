@@ -49,6 +49,15 @@
 #define AI_NUMERICSERV 0
 #endif
 
+/* GNU Hurd doesn't yet declare IPV6_TCLASS */
+#ifndef IPV6_TCLASS
+#if defined(__GNU__)
+#define IPV6_TCLASS 61
+#elif defined(__APPLE__)
+#define IPV6_TCLASS 36
+#endif
+#endif
+
 static inline int connect_pending()
 {
 #ifdef _WIN32
@@ -913,8 +922,10 @@ int udp_sockaddr(struct openconnect_info *vpninfo, int port)
 	} else if (vpninfo->peer_addr->sa_family == AF_INET6) {
 		struct sockaddr_in6 *sin = (void *)vpninfo->dtls_addr;
 		sin->sin6_port = htons(port);
+#if defined(IPV6_TCLASS)
 		vpninfo->dtls_tos_proto = IPPROTO_IPV6;
 		vpninfo->dtls_tos_optname = IPV6_TCLASS;
+#endif
 	} else {
 		vpn_progress(vpninfo, PRG_ERR,
 			     _("Unknown protocol family %d. Cannot create UDP server address\n"),
@@ -1010,7 +1021,12 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 	free(vpninfo->tun_pkt);
 	vpninfo->tun_pkt = NULL;
 
-	while ((ret = vpninfo->proto->tcp_connect(vpninfo))) {
+	while (1) {
+		script_config_tun(vpninfo, "attempt-reconnect");
+		ret = vpninfo->proto->tcp_connect(vpninfo);
+		if (!ret)
+			break;
+
 		if (timeout <= 0)
 			return ret;
 		if (ret == -EPERM) {
@@ -1037,4 +1053,105 @@ int ssl_reconnect(struct openconnect_info *vpninfo)
 		vpninfo->reconnected(vpninfo->cbdata);
 
 	return 0;
+}
+
+int cancellable_gets(struct openconnect_info *vpninfo, int fd,
+		     char *buf, size_t len)
+{
+	int i = 0;
+	int ret;
+
+	if (len < 2)
+		return -EINVAL;
+
+	while ((ret = cancellable_recv(vpninfo, fd, (void *)(buf + i), 1)) == 1) {
+		if (buf[i] == '\n') {
+			buf[i] = 0;
+			if (i && buf[i-1] == '\r') {
+				buf[i-1] = 0;
+				i--;
+			}
+			return i;
+		}
+		i++;
+
+		if (i >= len - 1) {
+			buf[i] = 0;
+			return i;
+		}
+	}
+	buf[i] = 0;
+	return i ?: ret;
+}
+
+int cancellable_send(struct openconnect_info *vpninfo, int fd,
+		     char *buf, size_t len)
+{
+	size_t count;
+
+	if (fd == -1)
+		return -EINVAL;
+
+	for (count = 0; count < len; ) {
+		fd_set rd_set, wr_set;
+		int maxfd = fd;
+		int i;
+
+		FD_ZERO(&wr_set);
+		FD_ZERO(&rd_set);
+		FD_SET(fd, &wr_set);
+		cmd_fd_set(vpninfo, &rd_set, &maxfd);
+
+		select(maxfd + 1, &rd_set, &wr_set, NULL, NULL);
+		if (is_cancel_pending(vpninfo, &rd_set))
+			return -EINTR;
+
+		/* Not that this should ever be able to happen... */
+		if (!FD_ISSET(fd, &wr_set))
+			continue;
+
+		i = send(fd, (void *)&buf[count], len - count, 0);
+		if (i < 0)
+			return -errno;
+
+		count += i;
+	}
+	return count;
+}
+
+
+int cancellable_recv(struct openconnect_info *vpninfo, int fd,
+		     char *buf, size_t len)
+{
+	size_t count;
+
+	if (fd == -1)
+		return -EINVAL;
+
+	for (count = 0; count < len; ) {
+		fd_set rd_set;
+		int maxfd = fd;
+		int i;
+
+		FD_ZERO(&rd_set);
+		FD_SET(fd, &rd_set);
+		cmd_fd_set(vpninfo, &rd_set, &maxfd);
+
+		select(maxfd + 1, &rd_set, NULL, NULL, NULL);
+		if (is_cancel_pending(vpninfo, &rd_set))
+			return -EINTR;
+
+		/* Not that this should ever be able to happen... */
+		if (!FD_ISSET(fd, &rd_set))
+			continue;
+
+		i = recv(fd, (void *)&buf[count], len - count, 0);
+		if (i < 0)
+			return -errno;
+		else if (i == 0)
+			return -ECONNRESET;
+
+		count += i;
+	}
+	return count;
 }

@@ -102,6 +102,8 @@ static int last_form_empty;
 
 static int sig_cmd_fd;
 
+static void add_form_field(char *field);
+
 #ifdef __ANDROID__
 #include <android/log.h>
 static void __attribute__ ((format(printf, 3, 4)))
@@ -161,6 +163,7 @@ enum {
 	OPT_CSD_WRAPPER,
 	OPT_DISABLE_IPV6,
 	OPT_DTLS_CIPHERS,
+	OPT_DTLS12_CIPHERS,
 	OPT_DUMP_HTTP,
 	OPT_FORCE_DPD,
 	OPT_GNUTLS_DEBUG,
@@ -193,6 +196,7 @@ enum {
 	OPT_LOCAL_HOSTNAME,
 	OPT_PROTOCOL,
 	OPT_PASSTOS,
+	OPT_VERSION,
 };
 
 
@@ -254,11 +258,13 @@ static const struct option long_options[] = {
 	OPTION("no-passwd", 0, OPT_NO_PASSWD),
 	OPTION("reconnect-timeout", 1, OPT_RECONNECT_TIMEOUT),
 	OPTION("dtls-ciphers", 1, OPT_DTLS_CIPHERS),
+	OPTION("dtls12-ciphers", 1, OPT_DTLS12_CIPHERS),
 	OPTION("authgroup", 1, OPT_AUTHGROUP),
 	OPTION("servercert", 1, OPT_SERVERCERT),
 	OPTION("resolve", 1, OPT_RESOLVE),
 	OPTION("key-password-from-fsid", 0, OPT_KEY_PASSWORD_FROM_FSID),
 	OPTION("useragent", 1, OPT_USERAGENT),
+	OPTION("version-string", 1, OPT_VERSION),
 	OPTION("local-hostname", 1, OPT_LOCAL_HOSTNAME),
 	OPTION("disable-ipv6", 0, OPT_DISABLE_IPV6),
 	OPTION("no-proxy", 0, OPT_NO_PROXY),
@@ -275,6 +281,7 @@ static const struct option long_options[] = {
 	OPTION("dump-http-traffic", 0, OPT_DUMP_HTTP),
 	OPTION("no-system-trust", 0, OPT_NO_SYSTEM_TRUST),
 	OPTION("protocol", 1, OPT_PROTOCOL),
+	OPTION("form-entry", 1, 'F'),
 #ifdef OPENCONNECT_GNUTLS
 	OPTION("gnutls-debug", 1, OPT_GNUTLS_DEBUG),
 #endif
@@ -373,36 +380,37 @@ static char *convert_arg_to_utf8(char **argv, char *arg)
 static void read_stdin(char **string, int hidden, int allow_fail)
 {
 	CONSOLE_READCONSOLE_CONTROL rcc = { sizeof(rcc), 0, 13, 0 };
-	HANDLE conh, stdinh = GetStdHandle(STD_INPUT_HANDLE);
+	HANDLE stdinh = GetStdHandle(STD_INPUT_HANDLE);
 	DWORD cmode, nr_read;
 	wchar_t wbuf[1024];
 	char *buf;
 
-	conh = stdinh;
-	if (!GetConsoleMode(conh, &cmode)) {
-		/* STDIN is not a console? Try opening it explicitly */
-		conh = CreateFile("CONIN$", GENERIC_READ, FILE_SHARE_READ,
-				  0,OPEN_EXISTING, 0, 0);
-		if (conh == INVALID_HANDLE_VALUE || !GetConsoleMode(conh, &cmode)) {
+	if (GetConsoleMode(stdinh, &cmode)) {
+		if (hidden)
+			SetConsoleMode(stdinh, cmode & (~ENABLE_ECHO_INPUT));
+
+		if (!ReadConsoleW(stdinh, wbuf, sizeof(wbuf)/2, &nr_read, &rcc)) {
 			char *errstr = openconnect__win32_strerror(GetLastError());
-			fprintf(stderr, _("Failed to open CONIN$: %s\n"), errstr);
+			fprintf(stderr, _("ReadConsole() failed: %s\n"), errstr);
 			free(errstr);
 			*string = NULL;
-			goto out;
+			if (hidden)
+				SetConsoleMode(stdinh, cmode);
+			return;
 		}
+		if (hidden)
+			SetConsoleMode(stdinh, cmode);
+	} else {
+		/* Not a console; maybe reading from a piped stdin? */
+		if (!fgetws(wbuf, sizeof(wbuf)/2, stdin)) {
+			char *errstr = openconnect__win32_strerror(GetLastError());
+			fprintf(stderr, _("fgetws() failed: %s\n"), errstr);
+			free(errstr);
+			*string = NULL;
+			return;
+		}
+		nr_read = wcslen(wbuf);
 	}
-	if (hidden) {
-		SetConsoleMode(conh, cmode & (~ENABLE_ECHO_INPUT));
-	}
-
-	if (!ReadConsoleW(conh, wbuf, sizeof(wbuf)/2, &nr_read, &rcc)) {
-		char *errstr = openconnect__win32_strerror(GetLastError());
-		fprintf(stderr, _("ReadConsole() failed: %s\n"), errstr);
-		free(errstr);
-		*string = NULL;
-		goto out;
-	}
-
 	if (nr_read >= 2 && wbuf[nr_read - 1] == 10 && wbuf[nr_read - 2] == 13) {
 		wbuf[nr_read - 2] = 0;
 		nr_read -= 2;
@@ -414,7 +422,7 @@ static void read_stdin(char **string, int hidden, int allow_fail)
 		fprintf(stderr, _("Error converting console input: %s\n"),
 			errstr);
 		free(errstr);
-		goto out;
+		return;
 	}
 	buf = malloc(nr_read);
 	if (!buf) {
@@ -428,18 +436,10 @@ static void read_stdin(char **string, int hidden, int allow_fail)
 			errstr);
 		free(errstr);
 		free(buf);
-		goto out;
+		return;
 	}
 
 	*string = buf;
-
-out:
-	if (hidden) {
-		SetConsoleMode(conh, cmode);
-		fprintf(stderr, "\n");
-	}
-	if (conh != stdinh && conh != INVALID_HANDLE_VALUE)
-		CloseHandle(conh);
 }
 
 #elif defined(HAVE_ICONV)
@@ -605,6 +605,10 @@ static void print_build_opts(void)
 		printf("%sTPM", sep);
 		sep = comma;
 	}
+	if (openconnect_has_tss2_blob_support()) {
+		printf("%sTPMv2", sep);
+		sep = comma;
+	}
 #if defined(OPENCONNECT_OPENSSL) && defined(HAVE_ENGINE)
 	else {
 		printf("%sTPM (%s)", sep, _("OpenSSL ENGINE not present"));
@@ -623,6 +627,7 @@ static void print_build_opts(void)
 	case 2:
 		printf("%sHOTP software token", sep);
 		sep = comma;
+		/* fall through */
 	case 1:
 		printf("%sTOTP software token", sep);
 		sep = comma;
@@ -637,10 +642,45 @@ static void print_build_opts(void)
 	}
 
 #ifdef HAVE_DTLS
-	printf("%sDTLS\n", sep);
-#else
-	printf(_("\nWARNING: No DTLS support in this binary. Performance will be impaired.\n"));
+	printf("%sDTLS", sep);
 #endif
+#ifdef HAVE_ESP
+	printf("%sESP", sep);
+#endif
+	printf("\n");
+
+#if !defined(HAVE_DTLS) || !defined(HAVE_ESP)
+	printf(_("WARNING: This binary lacks DTLS and/or ESP support. Performance will be impaired.\n"));
+#endif
+}
+
+static void print_supported_protocols(void)
+{
+	const char *comma = ", ", *sep = comma + 1;
+	struct oc_vpn_proto *protos, *p;
+
+	if (openconnect_get_supported_protocols(&protos)>=0) {
+		printf(_("Supported protocols:"));
+		for (p=protos; p->name; p++) {
+			printf("%s%s%s", sep, p->name, p==protos ? _(" (default)") : "");
+			sep = comma;
+		}
+		printf("\n");
+		free(protos);
+	}
+}
+
+static void print_supported_protocols_usage(void)
+{
+	struct oc_vpn_proto *protos, *p;
+
+	if (openconnect_get_supported_protocols(&protos)>=0) {
+		printf("\n%s:\n", _("Set VPN protocol"));
+		for (p=protos; p->name; p++)
+			printf("      --protocol=%-16s %s%s\n",
+				   p->name, p->description, p==protos ? _(" (default)") : "");
+		openconnect_free_supported_protocols(protos);
+	}
 }
 
 #ifndef _WIN32
@@ -693,6 +733,7 @@ static void handle_signal(int sig)
 	char cmd;
 
 	switch (sig) {
+	case SIGTERM:
 	case SIGINT:
 		cmd = OC_CMD_CANCEL;
 		break;
@@ -756,73 +797,27 @@ static int gai_override_cb(void *cbdata, const char *node,
 static void usage(void)
 {
 	printf(_("Usage:  openconnect [options] <server>\n"));
-	printf(_("Open client for Cisco AnyConnect VPN, version %s\n\n"), openconnect_version_str);
+	printf(_("Open client for multiple VPN protocols, version %s\n\n"), openconnect_version_str);
 	print_build_opts();
 	printf("      --config=CONFIGFILE         %s\n", _("Read options from config file"));
-#ifndef _WIN32
-	printf("  -b, --background                %s\n", _("Continue in background after startup"));
-	printf("      --pid-file=PIDFILE          %s\n", _("Write the daemon's PID to this file"));
-#endif
-	printf("  -c, --certificate=CERT          %s\n", _("Use SSL client certificate CERT"));
-	printf("  -e, --cert-expire-warning=DAYS  %s\n", _("Warn when certificate lifetime < DAYS"));
-	printf("  -k, --sslkey=KEY                %s\n", _("Use SSL private key file KEY"));
-	printf("  -C, --cookie=COOKIE             %s\n", _("Use WebVPN cookie COOKIE"));
-	printf("      --cookie-on-stdin           %s\n", _("Read cookie from standard input"));
-	printf("  -d, --deflate                   %s\n", _("Enable compression (default)"));
-	printf("  -D, --no-deflate                %s\n", _("Disable compression"));
-	printf("      --force-dpd=INTERVAL        %s\n", _("Set minimum Dead Peer Detection interval"));
-	printf("  -g, --usergroup=GROUP           %s\n", _("Set login usergroup"));
-	printf("  -h, --help                      %s\n", _("Display help text"));
-	printf("  -i, --interface=IFNAME          %s\n", _("Use IFNAME for tunnel interface"));
-#ifndef _WIN32
-	printf("  -l, --syslog                    %s\n", _("Use syslog for progress messages"));
-#endif
-	printf("      --timestamp                 %s\n", _("Prepend timestamp to progress messages"));
-	printf("      --passtos                   %s\n", _("copy TOS / TCLASS when using DTLS"));
-#ifndef _WIN32
-	printf("  -U, --setuid=USER               %s\n", _("Drop privileges after connecting"));
-	printf("      --csd-user=USER             %s\n", _("Drop privileges during CSD execution"));
-	printf("      --csd-wrapper=SCRIPT        %s\n", _("Run SCRIPT instead of CSD binary"));
-#endif
-	printf("  -m, --mtu=MTU                   %s\n", _("Request MTU from server (legacy servers only)"));
-	printf("      --base-mtu=MTU              %s\n", _("Indicate path MTU to/from server"));
-	printf("  -p, --key-password=PASS         %s\n", _("Set key passphrase or TPM SRK PIN"));
-	printf("      --key-password-from-fsid    %s\n", _("Key passphrase is fsid of file system"));
-	printf("  -P, --proxy=URL                 %s\n", _("Set proxy server"));
-	printf("      --proxy-auth=METHODS        %s\n", _("Set proxy authentication methods"));
-	printf("      --no-proxy                  %s\n", _("Disable proxy"));
-	printf("      --libproxy                  %s\n", _("Use libproxy to automatically configure proxy"));
-#ifndef LIBPROXY_HDR
-	printf("                                  %s\n", _("(NOTE: libproxy disabled in this build)"));
-#endif
-	printf("      --pfs                       %s\n", _("Require perfect forward secrecy"));
-	printf("  -q, --quiet                     %s\n", _("Less output"));
-	printf("  -Q, --queue-len=LEN             %s\n", _("Set packet queue limit to LEN pkts"));
-	printf("  -s, --script=SCRIPT             %s\n", _("Shell command line for using a vpnc-compatible config script"));
-	printf("                                  %s: \"%s\"\n", _("default"), default_vpncscript);
-#ifndef _WIN32
-	printf("  -S, --script-tun                %s\n", _("Pass traffic to 'script' program, not tun"));
-#endif
-	printf("  -u, --user=NAME                 %s\n", _("Set login username"));
 	printf("  -V, --version                   %s\n", _("Report version number"));
-	printf("  -v, --verbose                   %s\n", _("More output"));
-	printf("      --dump-http-traffic         %s\n", _("Dump HTTP authentication traffic (implies --verbose"));
-	printf("  -x, --xmlconfig=CONFIG          %s\n", _("XML config file"));
-	printf("      --authgroup=GROUP           %s\n", _("Choose authentication login selection"));
-	printf("      --authenticate              %s\n", _("Authenticate only and print login info"));
-	printf("      --cookieonly                %s\n", _("Fetch webvpn cookie only; don't connect"));
-	printf("      --printcookie               %s\n", _("Print webvpn cookie before connecting"));
-	printf("      --cafile=FILE               %s\n", _("Cert file for server verification"));
-	printf("      --disable-ipv6              %s\n", _("Do not ask for IPv6 connectivity"));
-	printf("      --dtls-ciphers=LIST         %s\n", _("OpenSSL ciphers to support for DTLS"));
-	printf("      --no-dtls                   %s\n", _("Disable DTLS"));
-	printf("      --no-http-keepalive         %s\n", _("Disable HTTP connection re-use"));
+	printf("  -h, --help                      %s\n", _("Display help text"));
+
+	print_supported_protocols_usage();
+
+	printf("\n%s:\n", _("Authentication"));
+	printf("  -u, --user=NAME                 %s\n", _("Set login username"));
 	printf("      --no-passwd                 %s\n", _("Disable password/SecurID authentication"));
-	printf("      --no-cert-check             %s\n", _("Do not require server SSL cert to be valid"));
-	printf("      --no-system-trust           %s\n", _("Disable default system certificate authorities"));
-	printf("      --no-xmlpost                %s\n", _("Do not attempt XML POST authentication"));
 	printf("      --non-inter                 %s\n", _("Do not expect user input; exit if it is required"));
 	printf("      --passwd-on-stdin           %s\n", _("Read password from standard input"));
+	printf("      --authgroup=GROUP           %s\n", _("Choose authentication login selection"));
+	printf("  -F, --form-entry=FORM:OPT=VALUE %s\n", _("Provide authentication form responses"));
+	printf("  -c, --certificate=CERT          %s\n", _("Use SSL client certificate CERT"));
+	printf("  -k, --sslkey=KEY                %s\n", _("Use SSL private key file KEY"));
+	printf("  -e, --cert-expire-warning=DAYS  %s\n", _("Warn when certificate lifetime < DAYS"));
+	printf("  -g, --usergroup=GROUP           %s\n", _("Set login usergroup"));
+	printf("  -p, --key-password=PASS         %s\n", _("Set key passphrase or TPM SRK PIN"));
+	printf("      --key-password-from-fsid    %s\n", _("Key passphrase is fsid of file system"));
 	printf("      --token-mode=MODE           %s\n", _("Software token type: rsa, totp or hotp"));
 	printf("      --token-secret=STRING       %s\n", _("Software token secret"));
 #ifndef HAVE_LIBSTOKEN
@@ -831,13 +826,87 @@ static void usage(void)
 #ifndef HAVE_LIBPCSCLITE
 	printf("                                  %s\n", _("(NOTE: Yubikey OATH disabled in this build)"));
 #endif
-	printf("      --reconnect-timeout         %s\n", _("Connection retry timeout in seconds"));
+
+	printf("\n%s:\n", _("Server validation"));
 	printf("      --servercert=FINGERPRINT    %s\n", _("Server's certificate SHA1 fingerprint"));
+	printf("      --no-cert-check             %s\n", _("Do not require server SSL cert to be valid"));
+	printf("      --no-system-trust           %s\n", _("Disable default system certificate authorities"));
+	printf("      --cafile=FILE               %s\n", _("Cert file for server verification"));
+
+	printf("\n%s:\n", _("Internet connectivity"));
+	printf("  -P, --proxy=URL                 %s\n", _("Set proxy server"));
+	printf("      --proxy-auth=METHODS        %s\n", _("Set proxy authentication methods"));
+	printf("      --no-proxy                  %s\n", _("Disable proxy"));
+	printf("      --libproxy                  %s\n", _("Use libproxy to automatically configure proxy"));
+#ifndef LIBPROXY_HDR
+	printf("                                  %s\n", _("(NOTE: libproxy disabled in this build)"));
+#endif
+	printf("      --reconnect-timeout         %s\n", _("Connection retry timeout in seconds"));
+	printf("      --resolve=HOST:IP           %s\n", _("Use IP when connecting to HOST"));
+	printf("      --passtos                   %s\n", _("copy TOS / TCLASS when using DTLS"));
+	printf("      --dtls-local-port=PORT      %s\n", _("Set local port for DTLS and ESP datagrams"));
+
+	printf("\n%s:\n", _("Authentication (two-phase)"));
+	printf("  -C, --cookie=COOKIE             %s\n", _("Use authentication cookie COOKIE"));
+	printf("      --cookie-on-stdin           %s\n", _("Read cookie from standard input"));
+	printf("      --authenticate              %s\n", _("Authenticate only and print login info"));
+	printf("      --cookieonly                %s\n", _("Fetch and print cookie only; don't connect"));
+	printf("      --printcookie               %s\n", _("Print cookie before connecting"));
+
+#ifndef _WIN32
+	printf("\n%s:\n", _("Process control"));
+	printf("  -b, --background                %s\n", _("Continue in background after startup"));
+	printf("      --pid-file=PIDFILE          %s\n", _("Write the daemon's PID to this file"));
+	printf("  -U, --setuid=USER               %s\n", _("Drop privileges after connecting"));
+#endif
+
+	printf("\n%s:\n", _("Logging (two-phase)"));
+#ifndef _WIN32
+	printf("  -l, --syslog                    %s\n", _("Use syslog for progress messages"));
+#endif
+	printf("  -v, --verbose                   %s\n", _("More output"));
+	printf("  -q, --quiet                     %s\n", _("Less output"));
+	printf("      --dump-http-traffic         %s\n", _("Dump HTTP authentication traffic (implies --verbose)"));
+	printf("      --timestamp                 %s\n", _("Prepend timestamp to progress messages"));
+
+	printf("\n%s:\n", _("VPN configuration script"));
+	printf("  -i, --interface=IFNAME          %s\n", _("Use IFNAME for tunnel interface"));
+	printf("  -s, --script=SCRIPT             %s\n", _("Shell command line for using a vpnc-compatible config script"));
+	printf("                                  %s: \"%s\"\n", _("default"), default_vpncscript);
+#ifndef _WIN32
+	printf("  -S, --script-tun                %s\n", _("Pass traffic to 'script' program, not tun"));
+#endif
+
+	printf("\n%s:\n", _("Tunnel control"));
+	printf("      --disable-ipv6              %s\n", _("Do not ask for IPv6 connectivity"));
+	printf("  -x, --xmlconfig=CONFIG          %s\n", _("XML config file"));
+	printf("  -m, --mtu=MTU                   %s\n", _("Request MTU from server (legacy servers only)"));
+	printf("      --base-mtu=MTU              %s\n", _("Indicate path MTU to/from server"));
+	printf("  -d, --deflate                   %s\n", _("Enable stateful compression (default is stateless only)"));
+	printf("  -D, --no-deflate                %s\n", _("Disable all compression"));
+	printf("      --force-dpd=INTERVAL        %s\n", _("Set minimum Dead Peer Detection interval"));
+	printf("      --pfs                       %s\n", _("Require perfect forward secrecy"));
+	printf("      --no-dtls                   %s\n", _("Disable DTLS and ESP"));
+	printf("      --dtls-ciphers=LIST         %s\n", _("OpenSSL ciphers to support for DTLS"));
+	printf("  -Q, --queue-len=LEN             %s\n", _("Set packet queue limit to LEN pkts"));
+
+	printf("\n%s:\n", _("Local system information"));
 	printf("      --useragent=STRING          %s\n", _("HTTP header User-Agent: field"));
 	printf("      --local-hostname=STRING     %s\n", _("Local hostname to advertise to server"));
-	printf("      --resolve=HOST:IP           %s\n", _("Use IP when connecting to HOST"));
 	printf("      --os=STRING                 %s\n", _("OS type (linux,linux-64,win,...) to report"));
-	printf("      --dtls-local-port=PORT      %s\n", _("Set local port for DTLS datagrams"));
+	printf("      --version-string=STRING     %s\n", _("reported version string during authentication"));
+	printf("                                  (%s %s)\n", _("default:"), openconnect_version_str);
+
+#ifndef _WIN32
+	printf("\n%s:\n", _("Trojan binary (CSD) execution"));
+	printf("      --csd-user=USER             %s\n", _("Drop privileges during trojan execution"));
+	printf("      --csd-wrapper=SCRIPT        %s\n", _("Run SCRIPT instead of trojan binary"));
+#endif
+
+	printf("\n%s:\n", _("Server bugs"));
+	printf("      --no-http-keepalive         %s\n", _("Disable HTTP connection re-use"));
+	printf("      --no-xmlpost                %s\n", _("Do not attempt XML POST authentication"));
+
 	printf("\n");
 
 	helpmessage();
@@ -882,9 +951,21 @@ static char *xstrdup(const char *arg)
 #define keep_config_arg() \
 	(config_file ? xstrdup(config_arg) : convert_arg_to_utf8(argv, config_arg))
 
-#define dup_config_arg() \
-	((config_file || is_arg_utf8(config_arg)) ? xstrdup(config_arg) : \
-	 convert_arg_to_utf8(argv, config_arg))
+#define dup_config_arg() __dup_config_arg(argv, config_arg)
+
+static inline char *__dup_config_arg(char **argv, char *config_arg)
+{
+	char *res;
+
+	if (config_file || is_arg_utf8(config_arg))
+	    return xstrdup(config_arg);
+
+	res = convert_arg_to_utf8(argv, config_arg);
+	/* Force a copy, even if conversion failed */
+	if (res == config_arg)
+		res = xstrdup(res);
+	return res;
+}
 
 static int next_option(int argc, char **argv, char **config_arg)
 {
@@ -902,9 +983,9 @@ static int next_option(int argc, char **argv, char **config_arg)
 	if (!config_file) {
 		opt = getopt_long(argc, argv,
 #ifdef _WIN32
-				  "C:c:Dde:g:hi:k:m:P:p:Q:qs:u:Vvx:",
+				  "C:c:Dde:F:g:hi:k:m:P:p:Q:qs:u:Vvx:",
 #else
-				  "bC:c:Dde:g:hi:k:lm:P:p:Q:qSs:U:u:Vvx:",
+				  "bC:c:Dde:F:g:hi:k:lm:P:p:Q:qSs:U:u:Vvx:",
 #endif
 				  long_options, NULL);
 
@@ -1023,7 +1104,7 @@ int main(int argc, char **argv)
 	char *urlpath = NULL;
 	struct oc_vpn_option *gai;
 	char *ip;
-	const char *compr = "";
+	const char *ssl_compr, *udp_compr;
 	char *proxy = getenv("https_proxy");
 	char *vpnc_script = NULL;
 	const struct oc_ip_info *ip_info;
@@ -1050,7 +1131,9 @@ int main(int argc, char **argv)
 	bindtextdomain("openconnect", LOCALEDIR);
 #endif
 
-	setlocale(LC_ALL, "");
+	if (!setlocale(LC_ALL, ""))
+		fprintf(stderr,
+			_("WARNING: Cannot set locale: %s\n"), strerror(errno));
 
 #ifdef HAVE_NL_LANGINFO
 	charset = nl_langinfo(CODESET);
@@ -1121,6 +1204,9 @@ int main(int argc, char **argv)
 			vpninfo->csd_wrapper = keep_config_arg();
 			break;
 #endif /* !_WIN32 */
+		case 'F':
+			add_form_field(keep_config_arg());
+			break;
 		case OPT_PROTOCOL:
 			if (openconnect_set_protocol(vpninfo, config_arg))
 				exit(1);
@@ -1180,7 +1266,7 @@ int main(int argc, char **argv)
 				fprintf(stderr, _("Missing colon in resolve option\n"));
 				exit(1);
 			}
-			gai = malloc(sizeof(*gai) + strlen(config_arg));
+			gai = malloc(sizeof(*gai) + strlen(config_arg) + 1);
 			if (!gai) {
 				fprintf(stderr, _("Failed to allocate memory\n"));
 				exit(1);
@@ -1188,7 +1274,7 @@ int main(int argc, char **argv)
 			gai->next = gai_overrides;
 			gai_overrides = gai;
 			gai->option = (void *)(gai + 1);
-			memcpy(gai->option, config_arg, strlen(config_arg));
+			memcpy(gai->option, config_arg, strlen(config_arg) + 1);
 			gai->option[ip - config_arg] = 0;
 			gai->value = gai->option + (ip - config_arg) + 1;
 			break;
@@ -1229,6 +1315,9 @@ int main(int argc, char **argv)
 		case OPT_DTLS_CIPHERS:
 			vpninfo->dtls_ciphers = keep_config_arg();
 			break;
+		case OPT_DTLS12_CIPHERS:
+			vpninfo->dtls12_ciphers = keep_config_arg();
+			break;
 		case OPT_AUTHGROUP:
 			authgroup = keep_config_arg();
 			break;
@@ -1256,6 +1345,7 @@ int main(int argc, char **argv)
 			break;
 		case 'h':
 			usage();
+			break;
 		case 'i':
 			vpninfo->ifname = dup_config_arg();
 			break;
@@ -1276,7 +1366,7 @@ int main(int argc, char **argv)
 			}
 			break;
 		case 'p':
-			vpninfo->cert_password = strdup(config_arg);
+			vpninfo->cert_password = dup_config_arg();
 			break;
 		case 'P':
 			proxy = keep_config_arg();
@@ -1340,6 +1430,7 @@ int main(int argc, char **argv)
 		case 'V':
 			printf(_("OpenConnect version %s\n"), openconnect_version_str);
 			print_build_opts();
+			print_supported_protocols();
 			exit(0);
 		case 'x':
 			vpninfo->xmlconfig = keep_config_arg();
@@ -1351,6 +1442,10 @@ int main(int argc, char **argv)
 		case OPT_USERAGENT:
 			free(vpninfo->useragent);
 			vpninfo->useragent = dup_config_arg();
+			break;
+		case OPT_VERSION:
+			free(vpninfo->version_string);
+			vpninfo->version_string = dup_config_arg();
 			break;
 		case OPT_LOCAL_HOSTNAME:
 			openconnect_set_localname(vpninfo, config_arg);
@@ -1455,6 +1550,7 @@ int main(int argc, char **argv)
 	memset(&sa, 0, sizeof(sa));
 
 	sa.sa_handler = handle_signal;
+	sigaction(SIGTERM, &sa, NULL);
 	sigaction(SIGINT, &sa, NULL);
 	sigaction(SIGHUP, &sa, NULL);
 	sigaction(SIGUSR2, &sa, NULL);
@@ -1527,33 +1623,26 @@ int main(int argc, char **argv)
 	STRDUP(vpninfo->vpnc_script, vpnc_script);
 
 	if (vpninfo->dtls_state != DTLS_DISABLED &&
-	    openconnect_setup_dtls(vpninfo, 60))
-		fprintf(stderr, _("Set up DTLS failed; using SSL instead\n"));
+	    openconnect_setup_dtls(vpninfo, 60)) {
+		/* Disable DTLS if we cannot set it up, otherwise
+		 * reconnects end up in infinite loop trying to connect
+		 * to non existing DTLS */
+		vpninfo->dtls_state = DTLS_DISABLED;
+		fprintf(stderr, _("Set up UDP failed; using SSL instead\n"));
+	}
 
 	openconnect_get_ip_info(vpninfo, &ip_info, NULL, NULL);
 
-	if (vpninfo->dtls_state != DTLS_CONNECTED) {
-		if (vpninfo->cstp_compr == COMPR_DEFLATE)
-			compr = " + deflate";
-		else if (vpninfo->cstp_compr == COMPR_LZS)
-			compr = " + lzs";
-		else if (vpninfo->cstp_compr == COMPR_LZ4)
-			compr = " + lz4";
-	} else {
-		if (vpninfo->dtls_compr == COMPR_DEFLATE)
-			compr = " + deflate";
-		else if (vpninfo->dtls_compr == COMPR_LZS)
-			compr = " + lzs";
-		else if (vpninfo->dtls_compr == COMPR_LZ4)
-			compr = " + lz4";
-	}
+	ssl_compr = openconnect_get_cstp_compression(vpninfo);
+	udp_compr = openconnect_get_dtls_compression(vpninfo);
 	vpn_progress(vpninfo, PRG_INFO,
-		     _("Connected as %s%s%s, using %s%s\n"),
+		     _("Connected as %s%s%s, using SSL%s%s, with %s%s%s %s\n"),
 		     ip_info->addr?:"",
 		     (ip_info->netmask6 && ip_info->addr) ? " + " : "",
 		     ip_info->netmask6 ? : "",
-		     (vpninfo->dtls_state != DTLS_CONNECTED) ? "SSL"
-		     : "DTLS", compr);
+		     ssl_compr ? " + " : "", ssl_compr ? : "",
+		     vpninfo->proto->udp_protocol ? : "UDP", udp_compr ? " + " : "", udp_compr ? : "",
+		     (vpninfo->dtls_state == DTLS_DISABLED || vpninfo->dtls_state == DTLS_NOSECRET ? _("disabled") : _("in progress")));
 
 	if (!vpninfo->vpnc_script) {
 		vpn_progress(vpninfo, PRG_INFO,
@@ -1617,7 +1706,7 @@ int main(int argc, char **argv)
 		ret = 1;
 		break;
 	case -EINTR:
-		vpn_progress(vpninfo, PRG_INFO, _("User cancelled (SIGINT); exiting.\n"));
+		vpn_progress(vpninfo, PRG_INFO, _("User cancelled (SIGINT/SIGTERM); exiting.\n"));
 		ret = 0;
 		break;
 	case -ECONNABORTED:
@@ -1876,6 +1965,53 @@ retry:
 
 	return 0;
 }
+struct form_field {
+	struct form_field *next;
+	char *form_id;
+	char *opt_id;
+	char *value;
+};
+static struct form_field *form_fields = NULL;
+
+static void add_form_field(char *arg)
+{
+	struct form_field *ff;
+	char *opt, *value = strchr(arg, '=');
+
+	if (!value || value == arg) {
+	bad_field:
+		fprintf(stderr, "Form field invalid. Use --form-entry=FORM_ID:OPT_NAME=VALUE\n");
+		exit(1);
+	}
+	*(value++) = 0;
+	opt = strchr(arg, ':');
+	if (!opt || opt == arg)
+		goto bad_field;
+	*(opt++) = 0;
+
+	ff = malloc(sizeof(*ff));
+	if (!ff) {
+		fprintf(stderr, "Out of memory for form field\n");
+		exit(1);
+	}
+	ff->form_id = arg;
+	ff->opt_id = opt;
+	ff->value = value;
+	ff->next = form_fields;
+	form_fields = ff;
+}
+
+static char *saved_form_field(struct openconnect_info *vpninfo, const char *form_id, const char *opt_id)
+{
+	struct form_field *ff = form_fields;
+
+	while (ff) {
+		if (!strcmp(form_id, ff->form_id) && !strcmp(ff->opt_id, opt_id))
+			return strdup(ff->value);
+		ff = ff->next;
+	}
+	return NULL;
+}
 
 /* Return value:
  *  < 0, on error
@@ -1901,6 +2037,8 @@ static int process_auth_form_cb(void *_vpninfo,
 	/* Special handling for GROUP: field if present, as different group
 	   selections can make other fields disappear/reappear */
 	if (form->authgroup_opt) {
+		if (!authgroup)
+			authgroup = saved_form_field(vpninfo, form->auth_id, form->authgroup_opt->form.name);
 		if (!authgroup ||
 		    match_choice_label(vpninfo, form->authgroup_opt, authgroup) != 0) {
 			if (prompt_opt_select(vpninfo, form->authgroup_opt, &authgroup) < 0)
@@ -1921,19 +2059,31 @@ static int process_auth_form_cb(void *_vpninfo,
 		   the Cisco clients do support them */
 		if (opt->type == OC_FORM_OPT_SELECT) {
 			struct oc_form_opt_select *select_opt = (void *)opt;
+			char *opt_response;
 
 			if (select_opt == form->authgroup_opt)
 				continue;
+
+			opt_response = saved_form_field(vpninfo, form->auth_id, select_opt->form.name);
+			if (opt_response &&
+			    match_choice_label(vpninfo, select_opt, opt_response) == 0) {
+				free(opt_response);
+				continue;
+			}
+			free(opt_response);
 			if (prompt_opt_select(vpninfo, select_opt, NULL) < 0)
 				goto err;
 			empty = 0;
 
 		} else if (opt->type == OC_FORM_OPT_TEXT) {
-			if (username && !strcmp(opt->name, "username")) {
-				opt->_value = username;  // fill-in the form
+			if (username &&
+			    !strncmp(opt->name, "user", 4)) {
+				opt->_value = username;
 				username = NULL;
 			} else {
-				opt->_value = prompt_for_input(opt->label, vpninfo, 0);
+				opt->_value = saved_form_field(vpninfo, form->auth_id, opt->name);
+				if (!opt->_value)
+					opt->_value = prompt_for_input(opt->label, vpninfo, 0);
 			}
 
 			if (!opt->_value) {
@@ -1978,11 +2128,17 @@ static int process_auth_form_cb(void *_vpninfo,
 				} else {
 					// For some reason we don't know the user@fqdn keychain name anymore
 					fprintf(stderr, _("Error determining keychain name.\n"));
-					opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+					opt->_value = saved_form_field(vpninfo, form->auth_id, opt->name);
+					if (!opt->_value) {
+						opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+					}
 				}
 			} else {
 				// This isn't the "password" field; probably "password#2"
-				opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+				opt->_value = saved_form_field(vpninfo, form->auth_id, opt->name);
+				if (!opt->_value) {
+					opt->_value = prompt_for_input(opt->label, vpninfo, 1);
+				}
 			}
 
 			if (!opt->_value) {
