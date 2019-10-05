@@ -37,7 +37,7 @@ Assumes you already have Homebrew installed.
     brew install autoconf automake libtool pkg-config
     
     # Runtime Requirements
-    brew install gettext gnutls
+    brew install gettext gnutls stoken oath-toolkit
 
 
 ### Building
@@ -46,7 +46,7 @@ First, we have to do some prep work to get the `vpnc-script` setup in advance:
 
     export INSTALL_DIR="/tmp/openconnect"  # or wherever...
     mkdir -p "$INSTALL_DIR"/{bin,var,etc}
-    curl http://git.infradead.org/users/dwmw2/vpnc-scripts.git/blob_plain/6e04e0bbb66c0bf0ae055c0f4e58bea81dbb5c3c:/vpnc-script -o "${INSTALL_DIR}/etc/vpnc-script"
+    curl http://git.infradead.org/users/dwmw2/vpnc-scripts.git/blob_plain/c84fb8e5a523a647a01a1229a9104db934e19f00:/vpnc-script -o "${INSTALL_DIR}/etc/vpnc-script"
     chmod +rx "${INSTALL_DIR}/etc/vpnc-script"
 
 Then run through the standard build process:
